@@ -1,75 +1,86 @@
-"""
-This script is designed to demonstrate how to use the CogVideoX-2b VAE model for video encoding and decoding.
-It allows you to encode a video into a latent representation, decode it back into a video, or perform both operations sequentially.
-Before running the script, make sure to clone the CogVideoX Hugging Face model repository and set the
-`{your local diffusers path}` argument to the path of the cloned repository.
-
-Command 1: Encoding Video
-Encodes the video located at ../resources/videos/1.mp4 using the CogVideoX-2b VAE model.
-Memory Usage: ~18GB of GPU memory for encoding.
-
-If you do not have enough GPU memory, we provide a pre-encoded tensor file (encoded.pt) in the resources folder,
-and you can still run the decoding command.
-
-$ python cli_vae_demo.py --model_path {your local diffusers path}/CogVideoX-2b/vae/ --video_path ../resources/videos/1.mp4 --mode encode
-
-Command 2: Decoding Video
-
-Decodes the latent representation stored in encoded.pt back into a video.
-Memory Usage: ~4GB of GPU memory for decoding.
-$ python cli_vae_demo.py --model_path {your local diffusers path}/CogVideoX-2b/vae/ --encoded_path ./encoded.pt --mode decode
-
-Command 3: Encoding and Decoding Video
-Encodes the video located at ../resources/videos/1.mp4 and then immediately decodes it.
-Memory Usage: 34GB for encoding + 19GB for decoding (sequentially).
-$ python cli_vae_demo.py --model_path {your local diffusers path}/CogVideoX-2b/vae/ --video_path ../resources/videos/1.mp4 --mode both
-"""
-
 import argparse
+import os
+from glob import glob
 import torch
 import imageio
 from diffusers import AutoencoderKLCogVideoX
 from torchvision import transforms
 import numpy as np
+from tqdm import tqdm
 
 
-def encode_video(model_path, video_path, dtype, device):
+def encode_video(npz_folder_path, output_folder_path, dtype, device):
     """
-    Loads a pre-trained AutoencoderKLCogVideoX model and encodes the video frames.
+    Loads a pre-trained AutoencoderKLCogVideoX model and encodes video frames from .npz files.
 
     Parameters:
-    - model_path (str): The path to the pre-trained model.
-    - video_path (str): The path to the video file.
+    - npz_folder_path (str): Path to folder containing .npz files.
+    - output_folder_path (str): Path to save encoded tensors.
     - dtype (torch.dtype): The data type for computation.
     - device (str): The device to use for computation (e.g., "cuda" or "cpu").
 
     Returns:
-    - torch.Tensor: The encoded video frames.
+    - dict: Dictionary with npz filenames as keys and encoded tensors as values.
     """
-
     model = AutoencoderKLCogVideoX.from_pretrained("THUDM/CogVideoX-2b", subfolder="vae", torch_dtype=dtype).to(device)
 
     model.enable_slicing()
     model.enable_tiling()
 
-    video_reader = imageio.get_reader(video_path, "ffmpeg")
+    # Find all .npz files in the folder
+    npz_files = sorted(glob(os.path.join(npz_folder_path, "*.npz")))
+    
+    if not npz_files:
+        print(f"No .npz files found in {npz_folder_path}")
+        return {}
 
-    frames = [transforms.ToTensor()(frame) for frame in video_reader]
-    video_reader.close()
+    encoded_results = {}
 
-    frames_tensor = torch.stack(frames).to(device).permute(1, 0, 2, 3).unsqueeze(0).to(dtype)
+    for npz_path in tqdm(npz_files, desc="Encoding videos using VAE:"):
+        try:
+            filename = os.path.basename(npz_path)
+            
+            # Load the npz file
+            video_data = np.load(npz_path)
+            
+            # Extract frames from the .npz file (assumes 'frames' key or first array)
+            if 'frames' in video_data.files:
+                frames_array = video_data['frames']
+            else:
+                # Use the first available array if 'frames' key doesn't exist
+                frames_array = video_data[video_data.files[0]]
+            
+            # Convert frames to tensors
+            frames = [transforms.ToTensor()(frame) for frame in frames_array]
+            video_data.close()
 
-    with torch.no_grad():
-        encoded_frames = model.encode(frames_tensor)[0].sample()
-    return encoded_frames
+            # Stack and permute frames for the VAE model
+            frames_tensor = torch.stack(frames).to(device).permute(1, 0, 2, 3).unsqueeze(0).to(dtype)
+
+            # Encode using the VAE model
+            with torch.no_grad():
+                encoded_frames = model.encode(frames_tensor)[0].sample()
+            
+            # Save encoded tensor
+            output_filename = os.path.splitext(filename)[0] + "_encoded.pt"
+            output_path = os.path.join(output_folder_path, output_filename)
+            torch.save(encoded_frames, output_path)
+            
+            encoded_results[filename] = encoded_frames
+            
+        except Exception as e:
+            print(f"✗ Error encoding {filename}: {e}")
+            continue
+
+    print(f"\nEncoding complete. Encoded {len(encoded_results)}/{len(npz_files)} files.")
+    return encoded_results
 
 
-def decode_video(model_path, encoded_tensor_path, dtype, device):
+def decode_video(encoded_tensor_path, dtype, device):
     """
     Loads a pre-trained AutoencoderKLCogVideoX model and decodes the encoded video frames.
 
     Parameters:
-    - model_path (str): The path to the pre-trained model.
     - encoded_tensor_path (str): The path to the encoded tensor file.
     - dtype (torch.dtype): The data type for computation.
     - device (str): The device to use for computation (e.g., "cuda" or "cpu").
@@ -77,7 +88,7 @@ def decode_video(model_path, encoded_tensor_path, dtype, device):
     Returns:
     - torch.Tensor: The decoded video frames.
     """
-    model = AutoencoderKLCogVideoX.from_pretrained(model_path, torch_dtype=dtype).to(device)
+    model = AutoencoderKLCogVideoX.from_pretrained("THUDM/CogVideoX-2b", subfolder="vae", torch_dtype=dtype).to(device)
     encoded_frames = torch.load(encoded_tensor_path, weights_only=True).to(device).to(dtype)
     with torch.no_grad():
         decoded_frames = model.decode(encoded_frames).sample
