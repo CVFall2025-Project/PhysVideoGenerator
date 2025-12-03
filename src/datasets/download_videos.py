@@ -86,7 +86,7 @@ def download_openvid(
     """
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if zip_folder is None:
-        zip_folder = os.path.join(project_root, "data", "zip_files")
+        zip_folder = os.path.join(project_root, "data", "download")
     if videos_folder is None:
         videos_folder = os.path.join(project_root, "data", "raw_videos")
     if csv_data_folder is None:

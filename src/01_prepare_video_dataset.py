@@ -41,12 +41,12 @@ def ensure_dirs(root: str) -> Dict[str, str]:
     paths = {
         "project_root": project_root,
         "zip_folder": os.path.join(project_root, "data", "download"),
-        "videos_folder": os.path.join(project_root, "data", "video"),
+        "videos_folder": os.path.join(project_root, "data", "raw_videos"),
         "clean_npz": os.path.join(project_root, "data", "clean_video_npz"),
         "encoded_vae": os.path.join(project_root, "data", "encoded_videos", "vae"),
         "encoded_vjepa": os.path.join(project_root, "data", "encoded_videos", "vjepa"),
         "encoded_text": os.path.join(project_root, "data", "encoded_videos", "text"),
-        "csv_data": os.path.join(project_root, "data", "test_csv"),
+        "csv_data": os.path.join(project_root, "data", "text_csv"),
         "index_file": os.path.join(project_root, "data", "indexed_dataset.jsonl"),
     }
     for p in paths.values():
@@ -66,7 +66,9 @@ def run_download(paths: Dict[str, str], parts_range=range(0, 1)) -> None:
 
 def run_clean(paths: Dict[str, str], target_fps=12, target_size=256, max_frames=16, limit: Optional[int]=None) -> None:
     logger.info("Starting cleaning step")
-    clean_videos.process_folder(
+    processor = clean_videos.VideoProcessor()
+
+    processor.process_folder(
         input_dir=paths["videos_folder"],
         output_dir=paths["clean_npz"],
         limit=limit,

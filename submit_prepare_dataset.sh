@@ -11,7 +11,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64GB
 #SBATCH --gpus=1
-#SBATCH --partition=gpu
+#SBATCH --partition=g2-standard-12
 
 # Optional: Set GPU type (uncomment if needed)
 # #SBATCH --gres=gpu:v100:1
