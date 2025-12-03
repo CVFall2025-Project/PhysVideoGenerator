@@ -1,26 +1,37 @@
-"""clean_videos.py
+"""clean_videos_2.py
 
-Convert raw videos into cleaned, fixed-size .npz clips for VAE encoding.
+Process raw videos into two separate cleaned formats:
+ - VAE pipeline: 480×720, 49 frames, normalized to [-1, 1]
+ - VJEPA2 pipeline: 256×256, 48 frames, ImageNet normalized [0,1]
 
-Functions:
-- load_video(path, target_fps): loads frames using Decord and resamples to target_fps
-- clean_frames(frames, target_size, max_frames): resize + center crop + normalize
-- process_video(path, out_path, ...): process a single video and save .npz
-- process_videos(input_dir, output_dir, ...): batch-process all mp4s in a folder
+Class-based design for flexibility and reusability.
 
-CLI usage:
-    python -m src.datasets.clean_videos
-
+Usage:
+    processor = VideoProcessor(target_fps=12)
+    
+    # Process single video
+    frames = load_video(path)  # (T, H, W, 3) uint8
+    outputs = processor.process_video(frames)
+    # outputs['vae'] -> (3, 49, 480, 720) in [-1, 1]
+    # outputs['vjepa'] -> (3, 48, 256, 256) ImageNet normalized
+    
+    # Batch process folder
+    processor.process_folder("data/video", "data/processed")
 """
 
 from __future__ import annotations
 
 import os
-from typing import Tuple, Dict, List
+from typing import Dict, Tuple, Optional
+import logging
 
 import numpy as np
 import cv2
 from tqdm import tqdm
+
+import torch
+from torchvision import transforms
+from torchvision.transforms import functional as F
 
 try:
     import decord
@@ -28,17 +39,19 @@ try:
 except Exception:
     decord = None
 
+logger = logging.getLogger(__name__)
 
-def load_video(path: str, target_fps: int) -> np.ndarray:
-    """Load video using Decord and normalize to `target_fps`.
 
-    Returns a numpy array of frames with shape (T, H, W, 3) and dtype uint8.
+def load_video_decord(path: str, target_fps: int) -> np.ndarray:
+    """Load video using Decord and resample to target_fps.
+    
+    Returns:
+        frames: (T, H, W, 3) uint8 numpy array
     """
     if decord is None:
-        raise RuntimeError("Decord is not available. Install decord or ensure it's importable.")
+        raise RuntimeError("Decord not available. Install decord.")
 
     vr = decord.VideoReader(path)
-
     orig_fps = vr.get_avg_fps()
     if orig_fps is None or orig_fps == 0:
         orig_fps = target_fps
@@ -47,154 +60,297 @@ def load_video(path: str, target_fps: int) -> np.ndarray:
     if step <= 0:
         step = 1.0
 
-    # sample indices at the target fps rate
     idxs = (np.arange(0, len(vr), step)).astype(int)
     idxs = idxs[idxs < len(vr)]
+    frames = vr.get_batch(idxs).asnumpy()
+    return frames  # (T, H, W, 3)
 
-    frames = vr.get_batch(idxs).asnumpy()  # (T, H, W, 3) uint8
-    return frames
 
-
-def clean_frames(frames: np.ndarray, target_size: int, max_frames: int) -> np.ndarray:
-    """Resize, center-crop, limit frames, and normalize to float32 in [0,1].
-
-    Args:
-        frames: (T, H, W, C) uint8 numpy array
-        target_size: desired height/width after crop
-        max_frames: maximum number of frames to keep
-
+def load_video_opencv(path: str, target_fps: int) -> np.ndarray:
+    """Fallback: Load video using OpenCV.
+    
     Returns:
-        cleaned: (T', target_size, target_size, 3) float32 array with values in [0,1]
+        frames: (T, H, W, 3) uint8 numpy array
     """
-    cleaned: List[np.ndarray] = []
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {path}")
 
-    for i, f in enumerate(frames):
-        if i >= max_frames:
+    orig_fps = cap.get(cv2.CAP_PROP_FPS)
+    if orig_fps is None or orig_fps <= 0:
+        orig_fps = target_fps
+
+    step = max(1, int(round(orig_fps / target_fps)))
+    frames = []
+    frame_idx = 0
+    target_idx = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
             break
+        if frame_idx % step == 0:
+            # Convert BGR -> RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb)
+        frame_idx += 1
 
-        h, w = f.shape[:2]
-        # scale shorter edge to target_size
-        scale = float(target_size) / float(min(h, w))
-        new_h = max(1, int(round(h * scale)))
-        new_w = max(1, int(round(w * scale)))
-        f_resized = cv2.resize(f, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    cap.release()
+    if frames:
+        return np.stack(frames, axis=0)
+    else:
+        raise RuntimeError(f"No frames extracted from {path}")
 
-        # center crop to (target_size, target_size)
-        h2, w2 = f_resized.shape[:2]
-        top = max(0, (h2 - target_size) // 2)
-        left = max(0, (w2 - target_size) // 2)
-        f_cropped = f_resized[top:top + target_size, left:left + target_size]
 
-        # If cropping produced smaller shape for edge cases, pad with black
-        ch, cw = f_cropped.shape[:2]
-        if ch != target_size or cw != target_size:
-            pad_h = target_size - ch
-            pad_w = target_size - cw
-            f_padded = cv2.copyMakeBorder(
-                f_cropped,
-                0,
-                pad_h,
-                0,
-                pad_w,
-                borderType=cv2.BORDER_CONSTANT,
-                value=[0, 0, 0],
-            )
-            f_final = f_padded
+class VideoProcessor:
+    """Process raw videos into VAE and VJEPA2 formats."""
+
+    def __init__(
+        self,
+        target_fps: int = 12,
+        vae_height: int = 480,
+        vae_width: int = 720,
+        vae_frames: int = 49,
+        vjepa_size: int = 256,
+        vjepa_frames: int = 48,
+        vjepa_mean: Tuple[float, float, float] = (0.485, 0.456, 0.406),
+        vjepa_std: Tuple[float, float, float] = (0.229, 0.224, 0.225),
+        use_decord: bool = True,
+        device: str = "cpu",
+    ):
+        """Initialize video processor.
+        
+        Args:
+            target_fps: target frames per second for loading videos
+            vae_height, vae_width: VAE input dimensions
+            vae_frames: number of frames for VAE (should be 49)
+            vjepa_size: square size for VJEPA2 (should be 256)
+            vjepa_frames: number of frames for VJEPA2 (should be 48, must be even)
+            vjepa_mean, vjepa_std: ImageNet normalization stats
+            use_decord: if True, use Decord; else use OpenCV fallback
+            device: torch device for processing
+        """
+        self.target_fps = target_fps
+        self.vae_height = vae_height
+        self.vae_width = vae_width
+        self.vae_frames = vae_frames
+        self.vjepa_size = vjepa_size
+        self.vjepa_frames = vjepa_frames
+        self.vjepa_mean = vjepa_mean
+        self.vjepa_std = vjepa_std
+        self.use_decord = use_decord
+        self.device = device
+
+        if torch is None:
+            raise RuntimeError("PyTorch is required. Install torch and torchvision.")
+
+        logger.info(
+            f"VideoProcessor initialized: VAE=[{vae_height}x{vae_width}, {vae_frames}f], "
+            f"VJEPA2=[{vjepa_size}x{vjepa_size}, {vjepa_frames}f]"
+        )
+
+    def load_video(self, path: str) -> np.ndarray:
+        """Load video and resample to target fps."""
+        if self.use_decord and decord is not None:
+            try:
+                return load_video_decord(path, self.target_fps)
+            except Exception as e:
+                logger.warning(f"Decord failed ({e}), falling back to OpenCV")
+                return load_video_opencv(path, self.target_fps)
         else:
-            f_final = f_cropped
+            return load_video_opencv(path, self.target_fps)
 
-        # Convert to float32 normalized
-        f_final = f_final.astype(np.float32) / 255.0
-        cleaned.append(f_final)
+    def process_video(self, frames_np: np.ndarray) -> Dict[str, np.ndarray]:
+        """Process raw video frames into VAE and VJEPA2 formats.
+        
+        Args:
+            frames_np: (T, H, W, 3) uint8 numpy array
+        
+        Returns:
+            {
+                "vae": (3, 49, 480, 720) float32 in [-1, 1],
+                "vjepa": (3, 48, 256, 256) float32 ImageNet normalized
+            }
+        """
+        # Convert to torch tensor (T, H, W, 3)
+        video_tensor = torch.from_numpy(frames_np).float()  # [T, H, W, 3]
 
-    if len(cleaned) == 0:
-        # return empty array with expected dims
-        return np.zeros((0, target_size, target_size, 3), dtype=np.float32)
+        # Permute to (T, 3, H, W) for torchvision ops
+        video_tensor = video_tensor.permute(0, 3, 1, 2)  # [T, 3, H, W]
 
-    cleaned_arr = np.stack(cleaned, axis=0)
-    return cleaned_arr
+        # ---------------------------------------------------------
+        # Pipeline A: VAE (480x720, 49 frames, [-1, 1])
+        # ---------------------------------------------------------
+        vae_video = F.resize(video_tensor, [self.vae_height, self.vae_width])
 
+        # Temporal sampling to exactly vae_frames
+        T_vae = vae_video.shape[0]
+        vae_indices = torch.linspace(0, T_vae - 1, self.vae_frames).long()
+        vae_video = vae_video[vae_indices]
 
-def process_video(
-    path: str,
-    out_path: str,
-    target_fps: int = 12,
-    target_size: int = 256,
-    max_frames: int = 16,
-) -> bool:
-    """Process a single video into a compressed .npz containing `frames`.
+        # Normalize to [-1, 1]
+        vae_video = (vae_video / 127.5) - 1.0
 
-    Returns True on success, False on error.
-    """
-    try:
-        frames = load_video(path, target_fps)
-        frames = clean_frames(frames, target_size, max_frames)
-        np.savez_compressed(out_path, frames)
-        return True
+        # Permute to [3, 49, 480, 720] for VAE input
+        vae_video = vae_video.permute(1, 0, 2, 3).unsqueeze(0)  # [1, 3, 49, 480, 720]
 
-    except Exception as e:
-        print(f"Error processing {path}: {e}")
-        return False
+        # ---------------------------------------------------------
+        # Pipeline B: VJEPA2 (256x256, 48 frames, ImageNet normalized)
+        # ---------------------------------------------------------
+        # Center crop to square (preserve aspect ratio)
+        H_orig = video_tensor.shape[2]
+        W_orig = video_tensor.shape[3]
+        min_dim = min(H_orig, W_orig)
+        vjepa_video = F.center_crop(video_tensor, [min_dim, min_dim])
 
+        # Resize to target size (256x256)
+        vjepa_video = F.resize(vjepa_video, [self.vjepa_size, self.vjepa_size])
 
-def process_videos(
-    input_dir: str,
-    output_dir: str,
-    target_fps: int = 12,
-    target_size: int = 256,
-    max_frames: int = 16,
-    limit: int | None = None,
-) -> Dict[str, int]:
-    """Process all .mp4 files in `input_dir` and save .npz to `output_dir`.
+        # Temporal sampling to exactly vjepa_frames
+        T_vjepa = vjepa_video.shape[0]
+        vjepa_indices = torch.linspace(0, T_vjepa - 1, self.vjepa_frames).long()
+        vjepa_video = vjepa_video[vjepa_indices]
 
-    Returns a summary dict: {"processed": n, "failed": m, "total": t}
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    video_files = [f for f in os.listdir(input_dir) if f.lower().endswith((".mp4"))]
-    if limit is not None:
-        video_files = video_files[:limit]
+        # Normalize to [0, 1] then apply ImageNet normalization
+        vjepa_video = vjepa_video / 255.0
+        # Permute to [3, 48, 256, 256] for normalization
+        vjepa_video = vjepa_video.permute(1, 0, 2, 3)
 
-    total = len(video_files)
-    processed = 0
-    failed = 0
+        # Apply ImageNet normalization per-channel
+        for c in range(3):
+            vjepa_video[c] = (vjepa_video[c] - self.vjepa_mean[c]) / self.vjepa_std[c]
+            
+        vjepa_video = vjepa_video.unsqueeze(0)  # [1, 3, 48, 256, 256]
 
-    for v in tqdm(video_files, desc="Processing videos"):
-        in_path = os.path.join(input_dir, v)
-        out_path = os.path.join(output_dir, f"{os.path.splitext(v)[0]}.npz")
-        ok = process_video(in_path, out_path, target_fps, target_size, max_frames)
-        if ok:
-            processed += 1
-        else:
-            failed += 1
+        return {
+            "vae": vae_video.cpu().numpy().astype(np.float32),
+            "vjepa": vjepa_video.cpu().numpy().astype(np.float32),
+        }
 
-    summary = {"processed": processed, "failed": failed, "total": total}
-    print(f"Done. Processed {processed}/{total}, failed {failed}.")
-    return summary
+    def process_video_to_file(
+        self,
+        video_path: str,
+        output_base: str,
+        vae_suffix: str = "_vae.npz",
+        vjepa_suffix: str = "_vjepa.npz",
+    ) -> bool:
+        """Process a single video file and save outputs.
+        
+        Args:
+            video_path: path to input video
+            output_base: base path for outputs (e.g., "data/vid_001")
+            vae_suffix: suffix for VAE output file
+            vjepa_suffix: suffix for VJEPA2 output file
+        
+        Returns:
+            True on success, False on error
+        """
+        try:
+            frames = self.load_video(video_path)
+            outputs = self.process_video(frames)
+
+            vae_path = output_base + vae_suffix
+            vjepa_path = output_base + vjepa_suffix
+
+            np.savez_compressed(vae_path, outputs["vae"])
+            np.savez_compressed(vjepa_path, outputs["vjepa"])
+
+            return True
+        except Exception as e:
+            logger.error(f"Error processing {video_path}: {e}")
+            return False
+
+    def process_folder(
+        self,
+        input_dir: str,
+        output_dir: str,
+        limit: Optional[int] = None,
+        video_extensions: Optional[Tuple[str, ...]] = (".mp4", ".mov", ".avi", ".mkv"),
+    ) -> Dict[str, int]:
+        """Batch process all videos in a folder.
+        
+        Args:
+            input_dir: directory with raw videos
+            output_dir: directory for processed outputs
+            limit: max number of videos to process (None = all)
+            video_extensions: video file extensions to process
+        
+        Returns:
+            summary dict with counts
+        """
+        os.makedirs(output_dir, exist_ok=True)
+
+        video_files = [
+            f
+            for f in os.listdir(input_dir)
+            if f.lower().endswith(video_extensions)
+        ]
+        if limit is not None:
+            video_files = video_files[:limit]
+
+        total = len(video_files)
+        processed = 0
+        failed = 0
+
+        for v in tqdm(video_files, desc="Processing videos"):
+            video_path = os.path.join(input_dir, v)
+            base_name = os.path.splitext(v)[0]
+            output_base = os.path.join(output_dir, base_name)
+
+            if self.process_video_to_file(video_path, output_base):
+                processed += 1
+            else:
+                failed += 1
+
+        summary = {"processed": processed, "failed": failed, "total": total}
+        logger.info(f"Batch processing complete: {processed}/{total} successful, {failed} failed.")
+        return summary
 
 
 if __name__ == "__main__":
-    # Simple CLI example
     import argparse
 
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    INPUT_DIR_DEFAULT = os.path.join(project_root, "data", "video")
-    OUTPUT_DIR_DEFAULT = os.path.join(project_root, "data", "clean_video_npz")
+    parser = argparse.ArgumentParser(
+        description="Process raw videos into VAE and VJEPA2 formats"
+    )
+    parser.add_argument(
+        "--input_dir",
+        default="data/video",
+        help="Directory with raw videos",
+    )
+    parser.add_argument(
+        "--output_dir",
+        default="data/processed",
+        help="Directory to save processed videos",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=12,
+        help="Target FPS for loading",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Max videos to process (for testing)",
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Torch device (cpu or cuda)",
+    )
 
-    parser = argparse.ArgumentParser(description="Process raw videos into cleaned .npz clips")
-    parser.add_argument("--input_dir", default=INPUT_DIR_DEFAULT, help="Directory with raw videos")
-    parser.add_argument("--output_dir", default=OUTPUT_DIR_DEFAULT, help="Directory to save .npz files")
-    parser.add_argument("--fps", type=int, default=12, help="Target FPS for clips")
-    parser.add_argument("--size", type=int, default=256, help="Target spatial size (height)")
-    parser.add_argument("--max_frames", type=int, default=16, help="Max frames per clip")
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of videos to process")
-    
     args = parser.parse_args()
 
-    process_videos(
+    logging.basicConfig(level=logging.INFO)
+
+    processor = VideoProcessor(
+        target_fps=args.fps,
+        device=args.device,
+    )
+    processor.process_folder(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
-        target_fps=args.fps,
-        target_size=args.size,
-        max_frames=args.max_frames,
         limit=args.limit,
     )

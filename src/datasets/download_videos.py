@@ -86,11 +86,11 @@ def download_openvid(
     """
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if zip_folder is None:
-        zip_folder = os.path.join(project_root, "data", "zip_download")
+        zip_folder = os.path.join(project_root, "data", "zip_files")
     if videos_folder is None:
-        videos_folder = os.path.join(project_root, "data", "raw_video")
+        videos_folder = os.path.join(project_root, "data", "raw_videos")
     if csv_data_folder is None:
-        csv_data_folder = os.path.join(project_root, "data")
+        csv_data_folder = os.path.join(project_root, "data", "text_csv")
     if error_log_path is None:
         error_log_path = os.path.join(zip_folder, "download_log.txt")
 
@@ -198,9 +198,9 @@ def download_openvid(
 if __name__ == "__main__":
     # simple CLI wrapper
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    zip_folder_default = os.path.join(project_root, "data", "download")
-    videos_folder_default = os.path.join(project_root, "data", "video")
-    data_folder_default = os.path.join(project_root, "data", "train")
+    zip_folder_default = os.path.join(project_root, "data", "zip_files")
+    videos_folder_default = os.path.join(project_root, "data", "raw_videos")
+    data_folder_default = os.path.join(project_root, "data", "text_csv")
 
     download_openvid(
         parts_range=range(0, 1),

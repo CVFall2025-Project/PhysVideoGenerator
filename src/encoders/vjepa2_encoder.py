@@ -39,8 +39,8 @@ class VJEPA2Encoder():
         
         with torch.inference_mode():
             # Shape: (T, H, W, C) -> (T, C, H, W)
-            video_transform = torch.from_numpy(video_array).permute(0, 3, 1, 2)
-            x_hf = self.transform(video_transform, return_tensors="pt")["pixel_values_videos"].to(self.device)
+            video_tensor = torch.from_numpy(video_array).permute(0, 3, 1, 2)
+            x_hf = self.transform(video_tensor, return_tensors="pt")["pixel_values_videos"].to(self.device)
             # Extract the patch-wise features from the last layer
             out_patch_features_hf = self.model.get_vision_features(x_hf)
 

@@ -43,7 +43,7 @@ def ensure_dirs(root: str) -> Dict[str, str]:
         "encoded_vae": os.path.join(project_root, "data", "encoded_videos", "vae"),
         "encoded_vjepa": os.path.join(project_root, "data", "encoded_videos", "vjepa"),
         "encoded_text": os.path.join(project_root, "data", "encoded_videos", "text"),
-        "csv_data": os.path.join(project_root, "data", "train"),
+        "csv_data": os.path.join(project_root, "data", "test_csv"),
         "index_file": os.path.join(project_root, "data", "indexed_dataset.jsonl"),
     }
     for p in paths.values():
@@ -63,13 +63,9 @@ def run_download(paths: Dict[str, str], parts_range=range(0, 1)) -> None:
 
 def run_clean(paths: Dict[str, str], target_fps=12, target_size=256, max_frames=16, limit: Optional[int]=None) -> None:
     logger.info("Starting cleaning step")
-    clean_videos.process_videos(
+    clean_videos.process_folder(
         input_dir=paths["videos_folder"],
         output_dir=paths["clean_npz"],
-        target_fps=target_fps,
-        target_size=target_size,
-        max_frames=max_frames,
-        save_fp16=True,
         limit=limit,
     )
 
@@ -80,28 +76,29 @@ def run_vae_encoding(paths, dtype: torch.dtype = torch.float16) -> Dict[str, str
     model = VAEEncoder("THUDM/CogVideoX-2b", torch_dtype=dtype, device="cuda" if torch.cuda.is_available() else "cpu")
     
     saved_map = {}
-    for path in glob(os.path.join(paths["clean_npz"], "*.npz")):
+    for path in glob(os.path.join(paths["clean_npz"], "*_vae.npz")):
         filename = os.path.basename(path)
 
         video_data = np.load(path)
         vae_encoded_frames = model.encode(video_data)
-        video_data.close()
+        # video_data is closed inside encode() method
 
         # Save encoded tensor
-        output_filename = os.path.splitext(filename)[0] + "_vae.npy"
+        output_filename = os.path.splitext(filename)[0] + ".npz"
         output_path = os.path.join(paths["encoded_vae"], output_filename)
-        torch.save(vae_encoded_frames, output_path)
-        saved_map[os.path.splitext(filename)[0]] = output_path
+        arr = vae_encoded_frames.detach().cpu().numpy()
+        np.savez_compressed(output_path, arr)
+        saved_map[os.path.splitext(filename)[0][:-4]] = output_path
     
     logger.info("VAE encoding complete.")
 
 
 def run_vjepa_encoding(paths: Dict[str, str]) -> Dict[str, str]:
-    logger.info("Starting VJEPA encoding step (if available)")
-    model = VJEPA2Encoder(model_name="facebook/vjepa2-vitg-fpc64-384", device="cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("Starting VJEPA encoding step")
+    model = VJEPA2Encoder(model_name="facebook/vjepa2-vitg-fpc64-256", device="cuda" if torch.cuda.is_available() else "cpu")
     
     saved_map = {}
-    for path in glob(os.path.join(paths["clean_npz"], "*.npz")):
+    for path in glob(os.path.join(paths["clean_npz"], "*_vjepa.npz")):
         filename = os.path.basename(path)
 
         try:
@@ -109,11 +106,11 @@ def run_vjepa_encoding(paths: Dict[str, str]) -> Dict[str, str]:
             vjepa_encoded_frames = model.encode(video_data)
             # video_data is closed inside encode() method
 
-            output_filename = os.path.splitext(filename)[0] + "_vjepa.npy"
+            output_filename = os.path.splitext(filename)[0] + ".npz"
             output_path = os.path.join(paths["encoded_vjepa"], output_filename)
             arr = vjepa_encoded_frames.detach().cpu().numpy()
-            np.save(output_path, arr)
-            saved_map[os.path.splitext(filename)[0]] = output_path
+            np.savez_compressed(output_path, arr)
+            saved_map[os.path.splitext(filename)[0][:-6]] = output_path
             logger.info(f"Saved VJEPA encoding for {filename} -> {output_path}")
         except Exception as e:
             logger.warning(f"Failed to encode {filename} with VJEPA: {e}")
@@ -126,7 +123,6 @@ def run_text_encoding(paths: Dict[str, str]) -> Dict[str, str]:
     csv_df = pd.read_csv(os.path.join(paths["csv_data"], "OpenVid-1M.csv"))
 
     saved_map = {}
-    # We'll use the default model name 't5-base' unless user configured otherwise
     model_name = "google/t5-v1_1-xxl"
 
     text_encoder = TextEncoder(model_name=model_name, device="cuda" if torch.cuda.is_available() else "cpu")
@@ -140,25 +136,21 @@ def run_text_encoding(paths: Dict[str, str]) -> Dict[str, str]:
     return saved_map
 
 
-def build_index(paths: Dict[str, str], vae_map: Dict[str, str], vjepa_map: Dict[str, str], text_map: Dict[str, str], fps=12, frames=16, height=256, width=256) -> None:
+def build_index(paths: Dict[str, str], vae_map: Dict[str, str], vjepa_map: Dict[str, str], text_map: Dict[str, str], fps=12) -> None:
     logger.info("Building indexed dataset")
     index_file = paths["index_file"]
     # Open JSONL file and append entries
     with open(index_file, "w") as outf:
         for fname in sorted(os.listdir(paths["clean_npz"])):
-            if not fname.endswith('.npz'):
+            if not fname.endswith('_vae.npz'):
                 continue
-            base = os.path.splitext(fname)[0]
+            base = os.path.splitext(fname)[0][:-4]  # remove _vae
             entry = {
                 "video_id": base,
-                "clean_npz": os.path.join(os.path.relpath(paths["clean_npz"]), fname),
                 "vae": os.path.relpath(vae_map.get(base, "")),
-                "vjepa": os.path.relpath(vjepa_map.get(base, "")) if vjepa_map else "",
-                "text": os.path.relpath(text_map.get(base, "")) if text_map else "",
+                "vjepa": os.path.relpath(vjepa_map.get(base, "")),
+                "text": os.path.relpath(text_map.get(base, "")),
                 "fps": fps,
-                "frames": frames,
-                "height": height,
-                "width": width,
             }
             outf.write(json.dumps(entry) + "\n")
     logger.info(f"Wrote index to {index_file}")
@@ -175,7 +167,7 @@ def main(root: str, do_steps: Dict[str, bool], parts_range=range(0, 1), limit: O
     if do_steps.get('vae', True):
         vae_map = run_vae_encoding(paths, device=("cuda" if torch.cuda.is_available() else "cpu"))
     vjepa_map = {}
-    if do_steps.get('vjepa', False):
+    if do_steps.get('vjepa', True):
         vjepa_map = run_vjepa_encoding(paths)
     text_map = {}
     if do_steps.get('text', True):
@@ -191,7 +183,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-download", dest="download", action="store_false", help="Skip download step")
     parser.add_argument("--no-clean", dest="clean", action="store_false", help="Skip cleaning step")
     parser.add_argument("--no-vae", dest="vae", action="store_false", help="Skip VAE encoding step")
-    parser.add_argument("--vjepa", dest="vjepa", action="store_true", help="Run VJEPA encoding if available")
+    parser.add_argument("--no-vjepa", dest="vjepa", action="store_false", help="Skip VJEPA encoding step")
     parser.add_argument("--no-text", dest="text", action="store_false", help="Skip text encoding step")
     parser.add_argument("--parts", type=int, default=1, help="Number of OpenVid parts to download (0..N) will set range(0, parts)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of videos to process during cleaning (for testing)")
