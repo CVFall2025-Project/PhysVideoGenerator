@@ -14,6 +14,9 @@ The script calls available helper modules in `src/datasets` and `src/encoders`.
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import argparse
 import logging
@@ -166,14 +169,13 @@ def build_index(paths: Dict[str, str], vae_map: Dict[str, str], vjepa_map: Dict[
 
 def main(root: str, do_steps: Dict[str, bool], parts_range=range(0, 1), limit: Optional[int] = None):
     paths = ensure_dirs(root)
-
     if do_steps.get('download', True):
         run_download(paths, parts_range=parts_range)
     if do_steps.get('clean', True):
         run_clean(paths, limit=limit)
     vae_map = {}
     if do_steps.get('vae', True):
-        vae_map = run_vae_encoding(paths, device=("cuda" if torch.cuda.is_available() else "cpu"))
+        vae_map = run_vae_encoding(paths)
     vjepa_map = {}
     if do_steps.get('vjepa', False):
         vjepa_map = run_vjepa_encoding(paths)
@@ -187,7 +189,7 @@ def main(root: str, do_steps: Dict[str, bool], parts_range=range(0, 1), limit: O
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="End-to-end prepare video dataset pipeline")
-    parser.add_argument("--root", default=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")), help="Project root")
+    parser.add_argument("--root", default=str(Path(__file__).parent.parent.resolve()), help="Project root")
     parser.add_argument("--no-download", dest="download", action="store_false", help="Skip download step")
     parser.add_argument("--no-clean", dest="clean", action="store_false", help="Skip cleaning step")
     parser.add_argument("--no-vae", dest="vae", action="store_false", help="Skip VAE encoding step")

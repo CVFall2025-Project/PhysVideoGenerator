@@ -121,6 +121,7 @@ def process_video(
     target_fps: int = 12,
     target_size: int = 256,
     max_frames: int = 16,
+    save_fp16: bool = True,
 ) -> bool:
     """Process a single video into a compressed .npz containing `frames`.
 
@@ -129,6 +130,8 @@ def process_video(
     try:
         frames = load_video(path, target_fps)
         frames = clean_frames(frames, target_size, max_frames)
+        if save_fp16:
+            frames = frames.astype(np.float16)
         np.savez_compressed(out_path, frames)
         return True
 
@@ -143,6 +146,7 @@ def process_videos(
     target_fps: int = 12,
     target_size: int = 256,
     max_frames: int = 16,
+    save_fp16: bool = True,
     limit: int | None = None,
 ) -> Dict[str, int]:
     """Process all .mp4 files in `input_dir` and save .npz to `output_dir`.
@@ -161,7 +165,7 @@ def process_videos(
     for v in tqdm(video_files, desc="Processing videos"):
         in_path = os.path.join(input_dir, v)
         out_path = os.path.join(output_dir, f"{os.path.splitext(v)[0]}.npz")
-        ok = process_video(in_path, out_path, target_fps, target_size, max_frames)
+        ok = process_video(in_path, out_path, target_fps, target_size, max_frames, save_fp16)
         if ok:
             processed += 1
         else:

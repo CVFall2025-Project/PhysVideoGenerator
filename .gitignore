@@ -1,9 +1,7 @@
 ## Video files
 *.mp4
 .venv/
-data/video/
-data/download/
-data/clean_video_npz/
-data/encoded_videos/vae_encoded/
+data/*
 __pycache__/
 *.pyc
+*.DS_Store
