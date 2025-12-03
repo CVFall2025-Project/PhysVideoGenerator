@@ -175,7 +175,9 @@ def main(root: str, do_steps: Dict[str, bool], parts_range=range(0, 1), limit: O
     if do_steps.get('text', True):
         text_map = run_text_encoding(paths)
 
-    build_index(paths, vae_map, vjepa_map, text_map)
+    # Finally, build index if only all steps are done
+    if all(do_steps.get(step, True) for step in ['vae', 'vjepa', 'text']):
+        build_index(paths, vae_map, vjepa_map, text_map)
 
 
 if __name__ == "__main__":
