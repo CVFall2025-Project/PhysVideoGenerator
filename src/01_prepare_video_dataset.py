@@ -51,7 +51,8 @@ def ensure_dirs(root: str) -> Dict[str, str]:
         "index_file": os.path.join(project_root, "data", "indexed_dataset.jsonl"),
     }
     for p in paths.values():
-        os.makedirs(p, exist_ok=True)
+        if p != paths["index_file"]:
+            os.makedirs(p, exist_ok=True)
     return paths
 
 
