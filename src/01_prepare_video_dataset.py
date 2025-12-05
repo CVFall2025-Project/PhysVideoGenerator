@@ -96,6 +96,7 @@ def run_vae_encoding(paths, dtype: torch.dtype = torch.float16) -> Dict[str, str
         saved_map[os.path.splitext(filename)[0][:-4]] = output_path
     
     logger.info("VAE encoding complete.")
+    return saved_map
 
 
 def run_vjepa_encoding(paths: Dict[str, str]) -> Dict[str, str]:
@@ -121,6 +122,7 @@ def run_vjepa_encoding(paths: Dict[str, str]) -> Dict[str, str]:
             logger.warning(f"Failed to encode {filename} with VJEPA: {e}")
     
     logger.info("VJEPA encoding complete.")
+    return saved_map
 
 
 def run_text_encoding(paths: Dict[str, str]) -> Dict[str, str]:
@@ -131,7 +133,7 @@ def run_text_encoding(paths: Dict[str, str]) -> Dict[str, str]:
     model_name = "google/t5-v1_1-xxl"
 
     text_encoder = TextEncoder(model_name=model_name, device="cuda" if torch.cuda.is_available() else "cpu")
-    for row in csv_df.iterrows():
+    for idx, row in csv_df.iterrows():
         filename = row["video"].split(".")[0]
         text_embedding = text_encoder.encode(row["caption"])
         saved_map[filename] = text_embedding
