@@ -302,6 +302,9 @@ class VideoProcessor:
             else:
                 failed += 1
 
+        delete_command = "rm -rf " + input_dir + "/*.mp4"
+        os.system(delete_command)
+
         summary = {"processed": processed, "failed": failed, "total": total}
         logger.info(f"Batch processing complete: {processed}/{total} successful, {failed} failed.")
         return summary
