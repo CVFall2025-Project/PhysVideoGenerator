@@ -172,8 +172,8 @@ class VideoProcessor:
                 "vjepa": (3, 48, 256, 256) float32 ImageNet normalized
             }
         """
-        # Convert to torch tensor (T, H, W, 3)
-        video_tensor = torch.from_numpy(frames_np).float()  # [T, H, W, 3]
+        # Convert to torch tensor (T, H, W, 3) and move to device
+        video_tensor = torch.from_numpy(frames_np).float().to(self.device)  # [T, H, W, 3]
 
         # Permute to (T, 3, H, W) for torchvision ops
         video_tensor = video_tensor.permute(0, 3, 1, 2)  # [T, 3, H, W]
@@ -185,7 +185,7 @@ class VideoProcessor:
 
         # Temporal sampling to exactly vae_frames
         T_vae = vae_video.shape[0]
-        vae_indices = torch.linspace(0, T_vae - 1, self.vae_frames).long()
+        vae_indices = torch.linspace(0, T_vae - 1, self.vae_frames, device=video_tensor.device).long()
         vae_video = vae_video[vae_indices]
 
         # Normalize to [-1, 1]
@@ -208,7 +208,7 @@ class VideoProcessor:
 
         # Temporal sampling to exactly vjepa_frames
         T_vjepa = vjepa_video.shape[0]
-        vjepa_indices = torch.linspace(0, T_vjepa - 1, self.vjepa_frames).long()
+        vjepa_indices = torch.linspace(0, T_vjepa - 1, self.vjepa_frames, device=video_tensor.device).long()
         vjepa_video = vjepa_video[vjepa_indices]
 
         # Normalize to [0, 1] then apply ImageNet normalization
@@ -219,9 +219,10 @@ class VideoProcessor:
         # Apply ImageNet normalization per-channel
         for c in range(3):
             vjepa_video[c] = (vjepa_video[c] - self.vjepa_mean[c]) / self.vjepa_std[c]
-            
+
         vjepa_video = vjepa_video.unsqueeze(0)  # [1, 3, 48, 256, 256]
 
+        # Move outputs back to CPU and convert to numpy for saving (keeps API unchanged)
         return {
             "vae": vae_video.cpu().numpy().astype(np.float32),
             "vjepa": vjepa_video.cpu().numpy().astype(np.float32),

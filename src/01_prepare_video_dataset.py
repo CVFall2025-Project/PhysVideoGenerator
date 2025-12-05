@@ -66,7 +66,7 @@ def run_download(paths: Dict[str, str], parts_range=range(0, 1)) -> None:
 
 def run_clean(paths: Dict[str, str], target_fps=12, target_size=256, max_frames=16, limit: Optional[int]=None) -> None:
     logger.info("Starting cleaning step")
-    processor = clean_videos.VideoProcessor()
+    processor = clean_videos.VideoProcessor(device="cuda" if torch.cuda.is_available() else "cpu")
 
     processor.process_folder(
         input_dir=paths["videos_folder"],
