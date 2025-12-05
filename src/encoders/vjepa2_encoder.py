@@ -12,11 +12,12 @@ from typing import Optional
 
 
 class VJEPA2Encoder():
-    def __init__(self, model_name: str, device: Optional[torch.device] = None):
+    def __init__(self, model_name: str, torch_dtype: torch.dtype = torch.float32, device: Optional[torch.device] = None):
         self.device = device or torch.device("cpu")
         self.model = AutoModel.from_pretrained(model_name).to(self.device)
         self.model.eval()
         self.transform = AutoVideoProcessor.from_pretrained(model_name)
+        self.torch_dtype = torch_dtype
 
     def encode(self, video) -> torch.Tensor:
         # Handle np.load(npz_file) which returns an NpzFile object
