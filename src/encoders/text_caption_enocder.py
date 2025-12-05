@@ -48,5 +48,6 @@ class TextEncoder():
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             embeddings = outputs.last_hidden_state  # (1, seq_len, hidden_dim)
+            embeddings = embeddings.detach().cpu()
 
         return embeddings
