@@ -84,17 +84,23 @@ def run_vae_encoding(paths, dtype: torch.dtype = torch.float16) -> Dict[str, str
     saved_map = {}
     for path in tqdm(glob(os.path.join(paths["clean_npz"], "*_vae.npz"))):
         filename = os.path.basename(path)
+        try:
+            video_data = np.load(path)
+            vae_encoded_frames = model.encode(video_data)
+            # video_data is closed inside encode() method
+            if vae_encoded_frames is None:
+                logger.warning(f"Skipping saving VAE encoding for {filename} due to encoding error.")
+                continue
 
-        video_data = np.load(path)
-        vae_encoded_frames = model.encode(video_data)
-        # video_data is closed inside encode() method
-
-        # Save encoded tensor
-        output_filename = os.path.splitext(filename)[0] + ".npz"
-        output_path = os.path.join(paths["encoded_vae"], output_filename)
-        arr = vae_encoded_frames.detach().cpu().numpy()
-        np.savez_compressed(output_path, arr)
-        saved_map[os.path.splitext(filename)[0][:-4]] = output_path
+            # Save encoded tensor
+            output_filename = os.path.splitext(filename)[0] + ".npz"
+            output_path = os.path.join(paths["encoded_vae"], output_filename)
+            arr = vae_encoded_frames.detach().cpu().numpy()
+            np.savez_compressed(output_path, arr)
+            saved_map[os.path.splitext(filename)[0][:-4]] = output_path
+        except Exception as e:
+            logger.warning(f"Failed to encode {filename} with VAE: {e}")
+            continue
     
     logger.info("VAE encoding complete.")
     return saved_map
@@ -121,6 +127,7 @@ def run_vjepa_encoding(paths: Dict[str, str]) -> Dict[str, str]:
             logger.info(f"Saved VJEPA encoding for {filename} -> {output_path}")
         except Exception as e:
             logger.warning(f"Failed to encode {filename} with VJEPA: {e}")
+            continue
     
     logger.info("VJEPA encoding complete.")
     return saved_map
@@ -136,11 +143,15 @@ def run_text_encoding(paths: Dict[str, str]) -> Dict[str, str]:
     text_encoder = TextEncoder(model_name=model_name, device="cuda" if torch.cuda.is_available() else "cpu")
     for idx, row in tqdm(csv_df.iterrows(), total=len(csv_df)):
         filename = row["video"].split(".")[0]
-        text_embedding = text_encoder.encode(row["caption"])
-        saved_map[filename] = text_embedding
-        output_filename = f"{filename}_text.npy"
-        output_path = os.path.join(paths["encoded_text"], output_filename)
-        np.save(output_path, text_embedding)
+        try:
+            text_embedding = text_encoder.encode(row["caption"])
+            saved_map[filename] = text_embedding
+            output_filename = f"{filename}_text.npy"
+            output_path = os.path.join(paths["encoded_text"], output_filename)
+            np.save(output_path, text_embedding)
+        except Exception as e:
+            logger.warning(f"Failed to encode text for {filename}: {e}")
+            continue
     return saved_map
 
 
