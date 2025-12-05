@@ -124,7 +124,6 @@ def run_vjepa_encoding(paths: Dict[str, str]) -> Dict[str, str]:
             arr = vjepa_encoded_frames.detach().cpu().numpy()
             np.savez_compressed(output_path, arr)
             saved_map[os.path.splitext(filename)[0][:-6]] = output_path
-            logger.info(f"Saved VJEPA encoding for {filename} -> {output_path}")
         except Exception as e:
             logger.warning(f"Failed to encode {filename} with VJEPA: {e}")
             continue
@@ -138,7 +137,7 @@ def run_text_encoding(paths: Dict[str, str]) -> Dict[str, str]:
     csv_df = pd.read_csv(os.path.join(paths["csv_data"], "OpenVid-1M.csv"))
 
     saved_map = {}
-    model_name = "google/t5-v1_1-xxl"
+    model_name = "t5-large"
 
     text_encoder = TextEncoder(model_name=model_name, device="cuda" if torch.cuda.is_available() else "cpu")
     for idx, row in tqdm(csv_df.iterrows(), total=len(csv_df)):
