@@ -26,6 +26,7 @@ import numpy as np
 import torch
 import pandas as pd
 from glob import glob
+from tqdm import tqdm
 
 from src.datasets import download_videos
 from src.datasets import clean_videos
@@ -81,7 +82,7 @@ def run_vae_encoding(paths, dtype: torch.dtype = torch.float16) -> Dict[str, str
     model = VAEEncoder("THUDM/CogVideoX-2b", torch_dtype=dtype, device="cuda" if torch.cuda.is_available() else "cpu")
     
     saved_map = {}
-    for path in glob(os.path.join(paths["clean_npz"], "*_vae.npz")):
+    for path in tqdm(glob(os.path.join(paths["clean_npz"], "*_vae.npz"))):
         filename = os.path.basename(path)
 
         video_data = np.load(path)
@@ -104,7 +105,7 @@ def run_vjepa_encoding(paths: Dict[str, str]) -> Dict[str, str]:
     model = VJEPA2Encoder(model_name="facebook/vjepa2-vitg-fpc64-256", device="cuda" if torch.cuda.is_available() else "cpu")
     
     saved_map = {}
-    for path in glob(os.path.join(paths["clean_npz"], "*_vjepa.npz")):
+    for path in tqdm(glob(os.path.join(paths["clean_npz"], "*_vjepa.npz"))):
         filename = os.path.basename(path)
 
         try:
@@ -133,7 +134,7 @@ def run_text_encoding(paths: Dict[str, str]) -> Dict[str, str]:
     model_name = "google/t5-v1_1-xxl"
 
     text_encoder = TextEncoder(model_name=model_name, device="cuda" if torch.cuda.is_available() else "cpu")
-    for idx, row in csv_df.iterrows():
+    for idx, row in tqdm(csv_df.iterrows(), total=len(csv_df)):
         filename = row["video"].split(".")[0]
         text_embedding = text_encoder.encode(row["caption"])
         saved_map[filename] = text_embedding
