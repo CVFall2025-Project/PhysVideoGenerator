@@ -21,7 +21,7 @@ class VAEEncoder():
             frames_array = video[video.files[0]]
         
         # Convert frames to tensors
-        video_tensor = torch.from_numpy(frames_array).permute(3, 0, 1, 2).unsqueeze(0).to(self.device).to(self.torch_dtype) # (1, C, T, H, W)
+        video_tensor = torch.from_numpy(frames_array).to(self.device).to(self.torch_dtype) # (1, C, T, H, W)
         video.close()
 
         # Encode using the VAE model

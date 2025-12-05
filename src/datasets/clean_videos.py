@@ -213,19 +213,15 @@ class VideoProcessor:
 
         # Normalize to [0, 1] then apply ImageNet normalization
         vjepa_video = vjepa_video / 255.0
-        # Permute to [3, 48, 256, 256] for normalization
-        vjepa_video = vjepa_video.permute(1, 0, 2, 3)
 
         # Apply ImageNet normalization per-channel
         for c in range(3):
-            vjepa_video[c] = (vjepa_video[c] - self.vjepa_mean[c]) / self.vjepa_std[c]
-
-        vjepa_video = vjepa_video.unsqueeze(0)  # [1, 3, 48, 256, 256]
+            vjepa_video[:, c] = (vjepa_video[:, c] - self.vjepa_mean[c]) / self.vjepa_std[c]
 
         # Move outputs back to CPU and convert to numpy for saving (keeps API unchanged)
         return {
-            "vae": vae_video.cpu().numpy().astype(np.float32),
-            "vjepa": vjepa_video.cpu().numpy().astype(np.float32),
+            "vae": vae_video.cpu().numpy().astype(np.float32), # [1, 3, 49, 480, 720]
+            "vjepa": vjepa_video.cpu().numpy().astype(np.float32), # [48, 3, 256, 256]
         }
 
     def process_video_to_file(
