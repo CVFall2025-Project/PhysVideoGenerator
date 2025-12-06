@@ -110,7 +110,6 @@ def process_video_full(
 
 def run_streaming_pipeline(
     root: str,
-    parts_range=range(0, 1),
     limit: Optional[int] = None,
     do_text: bool = True,
     do_vae: bool = True,
@@ -121,7 +120,6 @@ def run_streaming_pipeline(
     
     Args:
         root: project root
-        parts_range: parts to download
         limit: max videos per part (for testing)
         do_text: encode text captions after all videos
         do_vae: encode VAE
@@ -142,72 +140,38 @@ def run_streaming_pipeline(
     
     processed_videos = []
     
-    # Download and process each part sequentially
-    for part_idx in parts_range:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Processing part {part_idx}")
-        logger.info(f"{'='*60}")
-        
-        # Download and extract this part
-        # clean the raw_videos dir if it exists from previous run
-        if os.path.exists(paths["raw_videos"]):
-            shutil.rmtree(paths["raw_videos"])
-        try:
-            # Download single part
-            url = f"https://huggingface.co/datasets/nkp37/OpenVid-1M/resolve/main/OpenVid_part{part_idx}.zip"
-            zip_path = os.path.join(paths["zip_folder"], f"OpenVid_part{part_idx}.zip")
-            
-            if os.path.exists(zip_path):
-                logger.info(f"File {zip_path} exists. Skipping download.")
-            else:
-                logger.info(f"Downloading {url}...")
-                download_videos.download_file(url, zip_path)
-            
-            # Verify and extract
-            # if not download_videos.verify_zip(zip_path):
-            #     logger.error(f"ZIP verification failed for {zip_path}")
-            #     continue
-            
-            logger.info(f"Extracting to {paths['raw_videos']}...")
-            download_videos.extract_zip(zip_path, paths["raw_videos"])
+    # Process videos present in the `raw_videos` folder (downloader runs separately)
+    if not os.path.exists(paths["raw_videos"]):
+        logger.error(f"Raw videos directory not found: {paths['raw_videos']}. Place videos there or run downloader first.")
+        return {"processed": processed_videos}
 
-            # Delete zip after processing
-            if os.path.exists(zip_path):
-                os.remove(zip_path)
-            
-            # List videos
-            video_files = sorted([
-                f for f in os.listdir(paths["raw_videos"])
-                if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
-            ])
-            
-            if limit is not None:
-                video_files = video_files[:limit]
-            
-            logger.info(f"Processing {len(video_files)} videos from part {part_idx}")
-            
-            # Process each video immediately
-            for video_file in tqdm(video_files, desc=f"Part {part_idx} videos"):
-                video_path = os.path.join(paths["raw_videos"], video_file)
-                base_name, success = process_video_full(
-                    video_path,
-                    vae_encoder,
-                    vjepa_encoder,
-                    processor,
-                    paths,
-                )
-                if success:
-                    processed_videos.append(base_name)
-                
-                # Delete raw video immediately
-                if os.path.exists(video_path):
-                    os.remove(video_path)
-            
-            logger.info(f"Part {part_idx} complete. Processed {len(video_files)} videos.")
-            
-        except Exception as e:
-            logger.error(f"Error processing part {part_idx}: {e}")
-            continue
+    video_files = sorted([
+        f for f in os.listdir(paths["raw_videos"]) if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
+    ])
+
+    if limit is not None:
+        video_files = video_files[:limit]
+
+    logger.info(f"Processing {len(video_files)} videos from {paths['raw_videos']}")
+
+    for video_file in tqdm(video_files, desc="Processing videos"):
+        video_path = os.path.join(paths["raw_videos"], video_file)
+        base_name, success = process_video_full(
+            video_path,
+            vae_encoder,
+            vjepa_encoder,
+            processor,
+            paths,
+        )
+        if success:
+            processed_videos.append(base_name)
+
+        # Delete raw video immediately after processing
+        try:
+            if os.path.exists(video_path):
+                os.remove(video_path)
+        except Exception:
+            logger.warning(f"Failed to delete raw video {video_path}")
     
     logger.info(f"\n{'='*60}")
     logger.info(f"Streaming encoding complete. Processed {len(processed_videos)} videos total.")
@@ -238,7 +202,7 @@ def run_text_encoding_batch(paths: Dict[str, str], video_ids: list) -> Dict[str,
     text_encoder = TextEncoder(model_name=model_name, device=device)
     
     saved_map = {}
-    for idx, row in tqdm(csv_df.iterrows(), total=len(csv_df), desc="Text encoding"):
+    for _, row in tqdm(csv_df.iterrows(), total=len(csv_df), desc="Text encoding"):
         filename = row["video"].split(".")[0]
         
         # Only encode if this video was processed
@@ -294,7 +258,6 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Streaming video dataset preparation pipeline")
     parser.add_argument("--root", default=str(Path(__file__).parent.parent.resolve()), help="Project root")
-    parser.add_argument("--parts", type=int, default=1, help="Number of parts to process (0..N)")
     parser.add_argument("--limit", type=int, default=None, help="Max videos per part (for testing)")
     parser.add_argument("--no-text", dest="text", action="store_false", default=True, help="Skip text encoding")
     parser.add_argument("--no-vae", dest="vae", action="store_false", default=True, help="Skip VAE encoding")
@@ -302,10 +265,8 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    parts_range = range(0, max(1, args.parts))
     run_streaming_pipeline(
         root=args.root,
-        parts_range=parts_range,
         limit=args.limit,
         do_text=args.text,
         do_vae=args.vae,

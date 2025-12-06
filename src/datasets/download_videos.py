@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import argparse
 import shutil
 import glob
 from typing import Iterable, List
@@ -197,13 +198,18 @@ def download_openvid(
 
 if __name__ == "__main__":
     # simple CLI wrapper
+    parser = argparse.ArgumentParser(description="Downlaoding OpenVid dataset parts")
+    parser.add_argument("--start_parts", type=int, default=0, help="Number of parts to download (0..N)")
+    parser.add_argument("--end_parts", type=int, default=1, help="Number of parts to download (0..N)")
+    args = parser.parse_args()
+    
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    zip_folder_default = os.path.join(project_root, "data", "zip_files")
+    zip_folder_default = os.path.join(project_root, "data", "download")
     videos_folder_default = os.path.join(project_root, "data", "raw_videos")
     data_folder_default = os.path.join(project_root, "data", "text_csv")
 
     download_openvid(
-        parts_range=range(0, 1),
+        parts_range=range(args.start_parts, args.end_parts),
         zip_folder=zip_folder_default,
         videos_folder=videos_folder_default,
         csv_data_folder=data_folder_default,

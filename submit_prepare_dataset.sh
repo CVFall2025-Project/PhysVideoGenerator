@@ -35,9 +35,7 @@ source /scratch/sk12590/miniconda3/etc/profile.d/conda.sh
 conda activate cv_project
 
 # Run the pipeline with configurable options
-python -u src/01_prepare_video_dataset_streaming.py \
-    --parts 5 \
-    --limit 20
+python -u src/01_prepare_video_dataset_streaming.py
 
 echo "======================================"
 echo "Pipeline execution completed"
