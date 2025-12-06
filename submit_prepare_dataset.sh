@@ -36,12 +36,8 @@ conda activate cv_project
 
 # Run the pipeline with configurable options
 python -u src/01_prepare_video_dataset_streaming.py \
-    --parts 1 \
-    --limit 100 \
-    --no-clean \
-    --no-vae \
-    --no-vjepa \
-    --no-text \
+    --parts 5 \
+    --limit 20
 
 echo "======================================"
 echo "Pipeline execution completed"
@@ -54,17 +50,18 @@ LOCAL_RESULTS="/scratch/$USER/PhysVideoGenerator/data"
 # Define where you want them to go (login node / network scratch)
 TARGET="sk12590@greene.hpc.nyu.edu:/scratch/sk12590/PhysVideoGenerator/data/"
 
+ARCHIVE="/scratch/$USER/PhysVideoGenerator/results_${SLURM_JOB_ID}.tar.gz"
+
 # Ensure results directory exists
 if [ ! -d "$LOCAL_RESULTS" ]; then
   echo "No results found at $LOCAL_RESULTS - skipping transfer."
 else
-  ARCHIVE="results_${SLURM_JOB_ID}.tar.gz"
   echo "Creating archive $ARCHIVE from $LOCAL_RESULTS (contents)..."
   # -C change to directory, then archive contents (avoids storing absolute paths)
-  tar -C "$LOCAL_RESULTS" -czf "$ARCHIVE" . || { echo "tar failed"; exit 1; }
+  tar -C "$LOCAL_RESULTS" -czf "$ARCHIVE" .
 
   # Check archive size
-  echo "Archive created: $(du -h "$ARCHIVE" | cut -f1)"
+  # echo "Archive created: $(du -h "$ARCHIVE" | cut -f1)"
 
   # Send it home. Use BatchMode to avoid password prompt (fail fast if no keys)
   echo "Transferring $ARCHIVE -> $TARGET"
