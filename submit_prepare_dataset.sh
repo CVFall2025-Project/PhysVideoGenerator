@@ -6,7 +6,7 @@
 #SBATCH --output=logs/output_%j.out
 #SBATCH --error=logs/error_%j.err
 #SBATCH --account=csci_ga_2271_001-2025fa
-#SBATCH --time=04:00:00
+#SBATCH --time=10:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -35,7 +35,7 @@ source /scratch/sk12590/miniconda3/etc/profile.d/conda.sh
 conda activate cv_project
 
 # Run the pipeline with configurable options
-python -u src/01_prepare_video_dataset.py \
+python -u src/01_prepare_video_dataset_streaming.py \
     --parts 1 \
     --limit 100 \
     --no-clean \
