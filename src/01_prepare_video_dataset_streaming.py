@@ -56,10 +56,11 @@ def ensure_dirs(root: str) -> Dict[str, str]:
         "encoded_vjepa": os.path.join(project_root, "data", "encoded_videos", "vjepa"),
         "encoded_text": os.path.join(project_root, "data", "encoded_videos", "text"),
         "csv_data": os.path.join(project_root, "data", "text_csv"),
-        "index_file": os.path.join(project_root, "data", "indexed_dataset.jsonl"),
+        "index_file": os.path.join(project_root, "data", "indexed_dataset.json"),
     }
     for p in paths.values():
-        os.makedirs(p, exist_ok=True)
+        if p != paths["index_file"]:
+            os.makedirs(p, exist_ok=True)
     return paths
 
 
@@ -257,24 +258,27 @@ def build_index(paths: Dict[str, str], video_ids: list) -> None:
     logger.info("Building indexed dataset")
     index_file = paths["index_file"]
     
+    json_entries = []
+    for video_id in sorted(video_ids):
+        vae_file = os.path.join(paths["encoded_vae"], f"{video_id}_vae.npz")
+        vjepa_file = os.path.join(paths["encoded_vjepa"], f"{video_id}_vjepa.npz")
+        text_file = os.path.join(paths["encoded_text"], f"{video_id}_text.npy")
+        
+        # Only add if files exist
+        if not os.path.exists(vae_file):
+            continue
+        
+        entry = {
+            "video_id": video_id,
+            "vae": os.path.relpath(vae_file, paths["project_root"]),
+            "vjepa": os.path.relpath(vjepa_file, paths["project_root"]) if os.path.exists(vjepa_file) else None,
+            "text": os.path.relpath(text_file, paths["project_root"]) if os.path.exists(text_file) else None,
+            "fps": 12,
+        }
+        json_entries.append(entry)
+    
     with open(index_file, "w") as outf:
-        for video_id in sorted(video_ids):
-            vae_file = os.path.join(paths["encoded_vae"], f"{video_id}_vae.npz")
-            vjepa_file = os.path.join(paths["encoded_vjepa"], f"{video_id}_vjepa.npz")
-            text_file = os.path.join(paths["encoded_text"], f"{video_id}_text.npy")
-            
-            # Only add if files exist
-            if not os.path.exists(vae_file):
-                continue
-            
-            entry = {
-                "video_id": video_id,
-                "vae": os.path.relpath(vae_file, paths["project_root"]),
-                "vjepa": os.path.relpath(vjepa_file, paths["project_root"]) if os.path.exists(vjepa_file) else None,
-                "text": os.path.relpath(text_file, paths["project_root"]) if os.path.exists(text_file) else None,
-                "fps": 12,
-            }
-            outf.write(json.dumps(entry) + "\n")
+        json.dump(json_entries, outf, indent=2)
     
     logger.info(f"Wrote index to {index_file} for {len(video_ids)} videos")
 
