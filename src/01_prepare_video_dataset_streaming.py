@@ -52,6 +52,7 @@ def ensure_dirs(root: str) -> Dict[str, str]:
     paths = {
         "project_root": project_root,
         "zip_folder": os.path.join(project_root, "data", "download"),
+        "raw_videos": os.path.join(project_root, "data", "raw_videos"),
         "encoded_vae": os.path.join(project_root, "data", "encoded_videos", "vae"),
         "encoded_vjepa": os.path.join(project_root, "data", "encoded_videos", "vjepa"),
         "encoded_text": os.path.join(project_root, "data", "encoded_videos", "text"),
@@ -148,60 +149,65 @@ def run_streaming_pipeline(
         logger.info(f"{'='*60}")
         
         # Download and extract this part
-        with tempfile.TemporaryDirectory(prefix=f"openvid_part{part_idx}_") as temp_extract_dir:
-            try:
-                # Download single part
-                url = f"https://huggingface.co/datasets/nkp37/OpenVid-1M/resolve/main/OpenVid_part{part_idx}.zip"
-                zip_path = os.path.join(paths["zip_folder"], f"OpenVid_part{part_idx}.zip")
-                
+        # clean the raw_videos dir if it exists from previous run
+        if os.path.exists(paths["raw_videos"]):
+            shutil.rmtree(paths["raw_videos"])
+        try:
+            # Download single part
+            url = f"https://huggingface.co/datasets/nkp37/OpenVid-1M/resolve/main/OpenVid_part{part_idx}.zip"
+            zip_path = os.path.join(paths["zip_folder"], f"OpenVid_part{part_idx}.zip")
+            
+            if os.path.exists(zip_path):
+                logger.info(f"File {zip_path} exists. Skipping download.")
+            else:
                 logger.info(f"Downloading {url}...")
                 download_videos.download_file(url, zip_path)
-                
-                # Verify and extract
-                if not download_videos.verify_zip(zip_path):
-                    logger.error(f"ZIP verification failed for {zip_path}")
-                    continue
-                
-                logger.info(f"Extracting to {temp_extract_dir}...")
-                download_videos.extract_zip(zip_path, temp_extract_dir)
-                
-                # List videos
-                video_files = sorted([
-                    f for f in os.listdir(temp_extract_dir)
-                    if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
-                ])
-                
-                if limit is not None:
-                    video_files = video_files[:limit]
-                
-                logger.info(f"Processing {len(video_files)} videos from part {part_idx}")
-                
-                # Process each video immediately
-                for video_file in tqdm(video_files, desc=f"Part {part_idx} videos"):
-                    video_path = os.path.join(temp_extract_dir, video_file)
-                    base_name, success = process_video_full(
-                        video_path,
-                        vae_encoder,
-                        vjepa_encoder,
-                        processor,
-                        paths,
-                    )
-                    if success:
-                        processed_videos.append(base_name)
-                    
-                    # Delete raw video immediately
-                    if os.path.exists(video_path):
-                        os.remove(video_path)
-                
-                logger.info(f"Part {part_idx} complete. Processed {len(video_files)} videos.")
-                
-                # Delete zip after processing
-                if os.path.exists(zip_path):
-                    os.remove(zip_path)
             
-            except Exception as e:
-                logger.error(f"Error processing part {part_idx}: {e}")
-                continue
+            # Verify and extract
+            # if not download_videos.verify_zip(zip_path):
+            #     logger.error(f"ZIP verification failed for {zip_path}")
+            #     continue
+            
+            logger.info(f"Extracting to {paths['raw_videos']}...")
+            download_videos.extract_zip(zip_path, paths["raw_videos"])
+
+            # Delete zip after processing
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+            
+            # List videos
+            video_files = sorted([
+                f for f in os.listdir(paths["raw_videos"])
+                if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
+            ])
+            
+            if limit is not None:
+                video_files = video_files[:limit]
+            
+            logger.info(f"Processing {len(video_files)} videos from part {part_idx}")
+            
+            # Process each video immediately
+            for video_file in tqdm(video_files, desc=f"Part {part_idx} videos"):
+                video_path = os.path.join(paths["raw_videos"], video_file)
+                base_name, success = process_video_full(
+                    video_path,
+                    vae_encoder,
+                    vjepa_encoder,
+                    processor,
+                    paths,
+                )
+                if success:
+                    processed_videos.append(base_name)
+                
+                # Delete raw video immediately
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+            
+            logger.info(f"Part {part_idx} complete. Processed {len(video_files)} videos.")
+            
+        except Exception as e:
+            logger.error(f"Error processing part {part_idx}: {e}")
+            continue
     
     logger.info(f"\n{'='*60}")
     logger.info(f"Streaming encoding complete. Processed {len(processed_videos)} videos total.")
