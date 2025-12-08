@@ -166,12 +166,9 @@ def run_streaming_pipeline(
         if success:
             processed_videos.append(base_name)
 
-        # Delete raw video immediately after processing
-        try:
-            if os.path.exists(video_path):
-                os.remove(video_path)
-        except Exception:
-            logger.warning(f"Failed to delete raw video {video_path}")
+    # Delete raw video immediately after processing
+    delete_command = "rm -rf " + paths["raw_videos"] + "/*.mp4"
+    os.system(delete_command)
     
     logger.info(f"\n{'='*60}")
     logger.info(f"Streaming encoding complete. Processed {len(processed_videos)} videos total.")

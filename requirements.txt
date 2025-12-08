@@ -7,3 +7,4 @@ transformers==4.57.3
 diffusers==0.35.2
 ImageIO==2.37.2
 decord
+peft==0.14.0
