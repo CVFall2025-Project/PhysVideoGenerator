@@ -30,7 +30,6 @@ import cv2
 from tqdm import tqdm
 
 import torch
-from torchvision import transforms
 from torchvision.transforms import functional as F
 
 try:

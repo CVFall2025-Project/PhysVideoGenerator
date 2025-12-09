@@ -1,7 +1,6 @@
 import torch
 import imageio
 from diffusers import AutoencoderKLCogVideoX
-from torchvision import transforms
 import numpy as np
 from typing import Optional
 
