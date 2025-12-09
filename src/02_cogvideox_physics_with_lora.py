@@ -3,12 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import Dataset, DataLoader
+import numpy as np
 import math
 from typing import List, Tuple, Optional
 import logging
 from pathlib import Path
-
-from diffusers import CogVideoXTransformer3DModel, AutoencoderKLCogVideoX
+from diffusers import CogVideoXTransformer3DModel
 from peft import LoraConfig, get_peft_model
 
 # ============================================================================
@@ -26,6 +26,9 @@ class Config:
     SAVE_EVERY = 500
     LOG_EVERY = 10
     MAX_GRAD_NORM = 1.0
+
+    # Checkpoint resuming
+    RESUME_FROM_CHECKPOINT = None  # Path to checkpoint file, e.g., 'checkpoints/checkpoint_epoch5_step1000.pt'
     
     # LoRA Config (following official recommendations)
     LORA_RANK = 64  # Official rec: 64 for new concepts, 16-32 for moderate cases
@@ -55,8 +58,8 @@ class Config:
     MODEL_NAME = "THUDM/CogVideoX-2b"  # or "THUDM/CogVideoX-5b"
     
     # Paths
-    CHECKPOINT_DIR = Path('./checkpoints')
-    LOG_DIR = Path('./logs')
+    CHECKPOINT_DIR = Path('./data/checkpoints')
+    LOG_DIR = Path('./data/logs')
     
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     
@@ -275,6 +278,8 @@ class CogVideoXWithPhysics(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
+        self.device = config.device
+        self.torch_dtype = config.torch_dtype
         
         print(f"Loading CogVideoX from {config.MODEL_NAME}...")
         self.transformer = CogVideoXTransformer3DModel.from_pretrained(
@@ -383,34 +388,153 @@ class CogVideoXWithPhysics(nn.Module):
 # DATASET
 # ============================================================================
 class VideoPhysicsDataset(Dataset):
-    """Dataset with correct dimensions."""
-    def __init__(self, num_samples: int, config: Config):
-        self.num_samples = num_samples
+    """
+    Dataset that loads precomputed embeddings from numpy files.
+    
+    Expected index.json format:
+    [
+        {
+            "vae": "path/to/vae_latent_0.npz",
+            "vjepa": "path/to/vjepa_tokens_0.npz", 
+            "text": "path/to/text_embed_0.npy"
+        },
+        ...
+    ]
+    
+    Expected shapes:
+    - VAE latents: [C=16, T=13, H=60, W=90]
+    - VJEPA tokens: [seq_len=6144, dim=1408]
+    - Text embeddings: [seq_len=128, dim=1024]
+    """
+    def __init__(self, index_json_path: str, config: Config, cache_in_memory: bool = False):
+        """
+        Args:
+            index_json_path: Path to index.json file
+            config: Configuration object
+            cache_in_memory: If True, load all data into memory (faster but uses more RAM)
+        """
         self.config = config
+        self.cache_in_memory = cache_in_memory
         
-        print(f"Initializing dataset with shapes:")
-        print(f"  z0: [{config.LATENT_C}, {config.LATENT_T}, {config.LATENT_H}, {config.LATENT_W}]")
-        print(f"  vfm_tokens: [{config.VFM_SEQ_LEN}, {config.VFM_DIM}]")
-        print(f"  text_tokens: [{config.TEXT_SEQ_LEN}, {config.TEXT_DIM}]")
+        # Load index file
+        import json
+        with open(index_json_path, 'r') as f:
+            self.data_index = json.load(f)
         
-        self.z0_list = []
-        self.vfm_tokens_list = []
-        self.text_tokens_list = []
+        print(f"Loaded dataset index from: {index_json_path}")
+        print(f"Number of samples: {len(self.data_index)}")
+        print(f"Expected shapes:")
+        print(f"  VAE latents: [{config.LATENT_C}, {config.LATENT_T}, {config.LATENT_H}, {config.LATENT_W}]")
+        print(f"  VJEPA tokens: [{config.VFM_SEQ_LEN}, {config.VFM_DIM}]")
+        print(f"  Text embeddings: [{config.TEXT_SEQ_LEN}, {config.TEXT_DIM}]")
         
-        for _ in range(num_samples):
-            z0 = torch.randn(config.LATENT_C, config.LATENT_T, config.LATENT_H, config.LATENT_W)
-            vfm_tokens = torch.randn(config.VFM_SEQ_LEN, config.VFM_DIM)
-            text_tokens = torch.randn(config.TEXT_SEQ_LEN, config.TEXT_DIM)
+        # Optionally cache all data in memory
+        if cache_in_memory:
+            print("Caching all data in memory...")
+            self.cached_data = []
+            for idx in range(len(self.data_index)):
+                self.cached_data.append(self._load_sample(idx))
+            print("✓ All data cached in memory")
+        else:
+            self.cached_data = None
+            print("Data will be loaded on-the-fly from disk")
+        
+        # Verify first sample
+        self._verify_first_sample()
+    
+    def _load_sample(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Load a single sample from disk."""
+        sample_info = self.data_index[idx]
+        
+        # Load VAE latent
+        vae_path = sample_info['vae']
+        z0 = np.load(vae_path)
+        if "arr_0" in z0:
+            z0 = z0['arr_0']
+        elif "frames" in z0:
+            z0 = z0['frames']
+        else:
+            z0 = z0[list(z0.files)[0]]
+        z0 = torch.from_numpy(z0).to(self.config.device).to(self.config.torch_dtype) 
+        z0 = z0.squeeze(0).contiguous()  # [C, T, H, W]
+        
+        # Load VJEPA tokens
+        vjepa_path = sample_info['vjepa']
+        vfm_tokens = np.load(vjepa_path)
+        if "arr_0" in vfm_tokens:
+            vfm_tokens = vfm_tokens['arr_0']
+        elif "frames" in vfm_tokens:
+            vfm_tokens = vfm_tokens['frames']
+        else:
+            vfm_tokens = vfm_tokens[list(vfm_tokens.files)[0]]
+        vfm_tokens = torch.from_numpy(vfm_tokens).to(self.config.device).to(self.config.torch_dtype) 
+        vfm_tokens = vfm_tokens.squeeze(0).contiguous()  # [seq_len, dim]
+        
+        # Load text embeddings
+        text_path = sample_info['text']
+        text_tokens = np.load(text_path)
+        text_tokens = torch.from_numpy(text_tokens).to(self.config.device).to(self.config.torch_dtype)  # [seq_len, dim]
+        text_tokens = text_tokens.squeeze(0).contiguous()
+        
+        return z0, vfm_tokens, text_tokens
+    
+    def _verify_first_sample(self):
+        """Verify the first sample has correct dimensions."""
+        try:
+            z0, vfm_tokens, text_tokens = self._load_sample(0)
             
-            self.z0_list.append(z0)
-            self.vfm_tokens_list.append(vfm_tokens)
-            self.text_tokens_list.append(text_tokens)
+            print("\n" + "="*60)
+            print("Verifying first sample dimensions:")
+            print(f"  VAE latent shape: {list(z0.shape)} (expected: [{self.config.LATENT_C}, {self.config.LATENT_T}, {self.config.LATENT_H}, {self.config.LATENT_W}])")
+            print(f"  VJEPA tokens shape: {list(vfm_tokens.shape)} (expected: [{self.config.VFM_SEQ_LEN}, {self.config.VFM_DIM}])")
+            print(f"  Text embeddings shape: {list(text_tokens.shape)} (expected: [{self.config.TEXT_SEQ_LEN}, {self.config.TEXT_DIM}])")
+            
+            # Check dimensions match expectations
+            errors = []
+            
+            if z0.shape != (self.config.LATENT_C, self.config.LATENT_T, self.config.LATENT_H, self.config.LATENT_W):
+                errors.append(f"VAE latent shape mismatch: got {z0.shape}, expected [{self.config.LATENT_C}, {self.config.LATENT_T}, {self.config.LATENT_H}, {self.config.LATENT_W}]")
+            
+            if vfm_tokens.shape[0] != self.config.VFM_SEQ_LEN or vfm_tokens.shape[1] != self.config.VFM_DIM:
+                errors.append(f"VJEPA tokens shape mismatch: got {vfm_tokens.shape}, expected [{self.config.VFM_SEQ_LEN}, {self.config.VFM_DIM}]")
+            
+            if text_tokens.shape[0] != self.config.TEXT_SEQ_LEN or text_tokens.shape[1] != self.config.TEXT_DIM:
+                errors.append(f"Text embeddings shape mismatch: got {text_tokens.shape}, expected [{self.config.TEXT_SEQ_LEN}, {self.config.TEXT_DIM}]")
+            
+            if errors:
+                print("\n⚠️  DIMENSION MISMATCHES DETECTED:")
+                for error in errors:
+                    print(f"  - {error}")
+                print("\nPlease update your Config or check your data preprocessing!")
+                print("="*60 + "\n")
+                raise ValueError("Dataset dimensions do not match config. See errors above.")
+            else:
+                print("✓ All dimensions match expected values!")
+                print("="*60 + "\n")
+        
+        except Exception as e:
+            print(f"\n❌ Error verifying first sample: {e}")
+            print("="*60 + "\n")
+            raise
     
     def __len__(self) -> int:
-        return self.num_samples
+        return len(self.data_index)
     
-    def __getitem__(self, idx: int):
-        return self.z0_list[idx], self.vfm_tokens_list[idx], self.text_tokens_list[idx]
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Get a single sample.
+        
+        Returns:
+            z0: [C, T, H, W] - VAE latent
+            vfm_tokens: [seq_len, dim] - VJEPA tokens
+            text_tokens: [seq_len, dim] - Text embeddings
+        """
+        if self.cached_data is not None:
+            # Return from cache
+            return self.cached_data[idx]
+        else:
+            # Load from disk
+            return self._load_sample(idx)
 
 # ============================================================================
 # TRAINING UTILITIES
@@ -485,8 +609,18 @@ def train(config: Config):
                          weight_decay=config.WEIGHT_DECAY)
     
     # Dataset
-    dataset = VideoPhysicsDataset(num_samples=100, config=config)
-    dataloader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=0)
+    dataset = VideoPhysicsDataset(
+        index_json_path='path/to/your/index.json',  # UPDATE THIS PATH
+        config=config,
+        cache_in_memory=False  # Set True if you have enough RAM to cache all data
+    )
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=config.BATCH_SIZE, 
+        shuffle=True, 
+        num_workers=4,  # Parallel data loading
+        pin_memory=True if device.type == 'cuda' else False
+    )
     
     logging.info(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
     
@@ -501,7 +635,7 @@ def train(config: Config):
         epoch_l_diff = 0.0
         epoch_l_pred = 0.0
         
-        for _, (z0, vfm_tokens, text_tokens) in enumerate(dataloader):
+        for batch_idx, (z0, vfm_tokens, text_tokens) in enumerate(dataloader):
             z0 = z0.to(device)
             vfm_tokens = vfm_tokens.to(device)
             text_tokens = text_tokens.to(device)

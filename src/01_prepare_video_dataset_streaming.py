@@ -30,16 +30,13 @@ import json
 import argparse
 import logging
 from typing import Dict, Optional, Tuple
-import tempfile
-import shutil
 
 import numpy as np
 import torch
 import pandas as pd
-from glob import glob
 from tqdm import tqdm
 
-from src.datasets import download_videos, clean_videos
+from src.datasets import clean_videos
 from src.encoders.vae_encoder_decoder import VAEEncoder
 from src.encoders.vjepa2_encoder import VJEPA2Encoder
 from src.encoders.text_caption_enocder import TextEncoder
@@ -234,18 +231,29 @@ def build_index(paths: Dict[str, str], video_ids: list) -> None:
         # Only add if files exist
         if not os.path.exists(vae_file):
             continue
+        if not os.path.exists(vjepa_file):
+            vjepa_file = None
+        if not os.path.exists(text_file):
+            text_file = None
         
         entry = {
             "video_id": video_id,
-            "vae": os.path.relpath(vae_file, paths["project_root"]),
-            "vjepa": os.path.relpath(vjepa_file, paths["project_root"]) if os.path.exists(vjepa_file) else None,
-            "text": os.path.relpath(text_file, paths["project_root"]) if os.path.exists(text_file) else None,
-            "fps": 12,
+            "vae": vae_file,
+            "vjepa": vjepa_file,
+            "text": text_file,
         }
         json_entries.append(entry)
     
+    with open(index_file, "r") as outf:
+        try:
+            existing_data = json.load(outf)
+        except json.JSONDecodeError:
+            existing_data = []
+    
+    existing_data.extend(json_entries)
+    
     with open(index_file, "w") as outf:
-        json.dump(json_entries, outf, indent=2)
+        json.dump(existing_data, outf, indent=2)
     
     logger.info(f"Wrote index to {index_file} for {len(video_ids)} videos")
 
