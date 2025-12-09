@@ -191,7 +191,7 @@ def run_text_encoding_batch(paths: Dict[str, str], video_ids: list) -> Dict[str,
         return {}
     
     csv_df = pd.read_csv(csv_path)
-    model_name = "t5-large"
+    model_name = "t5-v1_1-xxl"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     text_encoder = TextEncoder(model_name=model_name, device=device)
     
