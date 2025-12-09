@@ -138,7 +138,7 @@ def run_text_encoding(paths: Dict[str, str]) -> Dict[str, str]:
     csv_df = pd.read_csv(os.path.join(paths["csv_data"], "OpenVid-1M.csv"))
 
     saved_map = {}
-    model_name = "t5-large"
+    model_name = "t5-v1_1-xxl"
 
     text_encoder = TextEncoder(model_name=model_name, device="cuda" if torch.cuda.is_available() else "cpu")
     for idx, row in tqdm(csv_df.iterrows(), total=len(csv_df)):
