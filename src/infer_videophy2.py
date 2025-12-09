@@ -13,11 +13,9 @@ import imageio
 from diffusers import AutoencoderKLCogVideoX
 from peft import PeftModel
 
+
 # ------------------------------------------------------------------------
-# Import your training definitions
-#   >>> IMPORTANT: change this import to match your actual module name <<<
-# ------------------------------------------------------------------------
-from cogvideox_physics_train import (   # was "02_cogvideox_physics_with_lora"
+from 02_cogvideox_physics_with_lora import (
     Config,
     CogVideoXWithPhysics,
     PredictorP,
