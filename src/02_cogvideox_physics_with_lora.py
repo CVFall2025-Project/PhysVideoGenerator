@@ -10,7 +10,7 @@ from torch.optim import AdamW
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import math
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Optional
 import logging
 from pathlib import Path
 import json
@@ -56,7 +56,7 @@ class Config:
     LATENT_W = 90
     
     DIM_T = 256
-    HIDDEN_DIM = 1024
+    HIDDEN_DIM = 4096 #  t5-v1_1-xxl hidden size
     
     # Model
     MODEL_NAME = "THUDM/CogVideoX-2b"
