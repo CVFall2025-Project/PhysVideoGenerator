@@ -20,7 +20,7 @@ class TextEncoder():
     def __init__(self, model_name: str, device: Optional[torch.device] = None):
         self.device = device or torch.device("cpu")
         self.tokenizer = T5Tokenizer.from_pretrained(model_name)
-        self.model = T5EncoderModel.from_pretrained(model_name, sub_folder="text_encoder").to(self.device)
+        self.model = T5EncoderModel.from_pretrained(model_name).to(self.device)
         self.model.eval()
 
     def encode(self, caption: str, max_length: int = 226) -> torch.Tensor:
