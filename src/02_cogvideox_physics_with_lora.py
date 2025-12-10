@@ -49,7 +49,7 @@ class Config:
     # Model dimensions
     VFM_SEQ_LEN = 6144
     VFM_DIM = 1408
-    TEXT_SEQ_LEN = 128
+    TEXT_SEQ_LEN = 226
     TEXT_DIM = 4096 #  t5-v1_1-xxl hidden size
     
     # VAE latent shape
