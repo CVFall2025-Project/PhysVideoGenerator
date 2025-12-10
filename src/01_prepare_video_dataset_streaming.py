@@ -231,9 +231,9 @@ def build_index(paths: Dict[str, str], video_ids: list) -> None:
         if not os.path.exists(vae_file):
             continue
         if not os.path.exists(vjepa_file):
-            vjepa_file = None
+            continue
         if not os.path.exists(text_file):
-            text_file = None
+            continue
         
         entry = {
             "video_id": video_id,
