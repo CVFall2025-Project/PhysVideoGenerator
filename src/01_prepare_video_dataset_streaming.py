@@ -97,7 +97,6 @@ def process_video_full(
         vjepa_path = os.path.join(output_paths["encoded_vjepa"], f"{base_name}_vjepa.npz")
         np.savez_compressed(vjepa_path, vjepa_arr)
         
-        logger.info(f"Encoded {base_name}: VAE→{vae_path}, VJEPA→{vjepa_path}")
         return base_name, True
     
     except Exception as e:
