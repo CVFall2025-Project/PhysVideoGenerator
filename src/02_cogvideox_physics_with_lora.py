@@ -131,6 +131,9 @@ def q_sample(z0: torch.Tensor, t: torch.Tensor, alpha_bar: torch.Tensor,
     
     alpha_bar_t = alpha_bar[t].view(-1, 1, 1, 1, 1)
     z_t = torch.sqrt(alpha_bar_t) * z0 + torch.sqrt(1 - alpha_bar_t) * noise
+
+    z_t = z_t.contiguous()
+    noise = noise.contiguous()
     return z_t, noise
 
 def sinusoidal_timestep_embedding(t: torch.Tensor, dim: int):
@@ -420,7 +423,7 @@ class CogVideoXWithPhysics(nn.Module):
         
         # 2. Patch embedding
         # Note: CogVideoX expects [B, T, C, H, W] format for patch_embed
-        hidden_states_reordered = hidden_states.permute(0, 2, 1, 3, 4)  # [B, C, T, H, W] -> [B, T, C, H, W]
+        hidden_states_reordered = hidden_states.permute(0, 2, 1, 3, 4).contiguous()  # [B, C, T, H, W] -> [B, T, C, H, W]
         hidden_states_patched = self.transformer.patch_embed(encoder_hidden_states, hidden_states_reordered)
         hidden_states_patched = self.transformer.embedding_dropout(hidden_states_patched)
         
@@ -509,7 +512,7 @@ class VideoPhysicsDataset(Dataset):
             z0 = vae_npz['latents']
         else:
             z0 = vae_npz[vae_npz.files[0]]
-        z0 = torch.from_numpy(z0).float()
+        z0 = torch.from_numpy(z0).squeeze(0).float()
 
         vjepa_npz = np.load(sample_info['vjepa'])
         if 'arr_0' in vae_npz:
@@ -518,9 +521,9 @@ class VideoPhysicsDataset(Dataset):
             vfm_tokens = vjepa_npz['latents']
         else:
             vfm_tokens = vjepa_npz[vjepa_npz.files[0]]
-        vfm_tokens = torch.from_numpy(vfm_tokens).float()
-        
-        text_tokens = torch.from_numpy(np.load(sample_info['text'])).float()
+        vfm_tokens = torch.from_numpy(vfm_tokens).squeeze(0).float()
+
+        text_tokens = torch.from_numpy(np.load(sample_info['text'])).squeeze(0).float()
         return z0, vfm_tokens, text_tokens
     
     def _verify_first_sample(self):
