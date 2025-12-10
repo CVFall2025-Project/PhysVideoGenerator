@@ -174,7 +174,7 @@ def run_streaming_pipeline(
     
     # Encode text captions if requested (do this after all video processing)
     if do_text:
-        run_text_encoding_batch(paths, processed_videos)
+        run_text_encoding_batch(paths)
     
     # Build index
     build_index(paths, processed_videos)
@@ -182,7 +182,7 @@ def run_streaming_pipeline(
     return {"processed": processed_videos}
 
 
-def run_text_encoding_batch(paths: Dict[str, str], video_ids: list) -> Dict[str, str]:
+def run_text_encoding_batch(paths: Dict[str, str]) -> Dict[str, str]:
     """Encode text captions for processed videos."""
     logger.info("Starting text encoding step")
     csv_path = os.path.join(paths["csv_data"], "OpenVid-1M.csv")
@@ -192,6 +192,10 @@ def run_text_encoding_batch(paths: Dict[str, str], video_ids: list) -> Dict[str,
         return {}
     
     csv_df = pd.read_csv(csv_path)
+
+    encoded_video_path_list = os.listdir(paths["encoded_vae"])
+    video_ids = set([fname[:-8] for fname in encoded_video_path_list])
+
     model_name = "t5-v1_1-xxl"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     text_encoder = TextEncoder(model_name=model_name, device=device)
