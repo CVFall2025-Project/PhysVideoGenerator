@@ -4,6 +4,7 @@ Complete implementation with LoRA adapters and physics cross-attention
 NOW WITH WEIGHTS & BIASES INTEGRATION
 """
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -49,7 +50,7 @@ class Config:
     VFM_SEQ_LEN = 6144
     VFM_DIM = 1408
     TEXT_SEQ_LEN = 128
-    TEXT_DIM = 1024
+    TEXT_DIM = 4096 #  t5-v1_1-xxl hidden size
     
     # VAE latent shape
     LATENT_C = 16
@@ -58,26 +59,36 @@ class Config:
     LATENT_W = 90
     
     DIM_T = 256
-    HIDDEN_DIM = 4096 #  t5-v1_1-xxl hidden size
+    HIDDEN_DIM = 1024 
     
     # Model
     MODEL_NAME = "THUDM/CogVideoX-2b"
     
     # Paths
     CHECKPOINT_DIR = Path('/scratch/sk12590/PhysVideoGenerator/checkpoints')
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
     LOG_DIR = Path('/scratch/sk12590/PhysVideoGenerator/logs')
-    DATASET_INDEX = '/scratch/sk12590/PhysVideoGenerator/data/indexed_dataset.json'  # UPDATE THIS
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+    DATASET_INDEX = '/scratch/sk12590/PhysVideoGenerator/data/indexed_dataset.json'
     
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     USE_8BIT_ADAM = True
     
     # ========== WANDB CONFIG (ADDED) ==========
     WANDB_PROJECT = "physics-video-diffusion"
-    WANDB_ENTITY = None  # Set to your wandb username/team if needed
-    WANDB_RUN_NAME = None  # Auto-generated if None
+    WANDB_ENTITY = "sk12590"  # Set to your wandb username/team if needed
+    WANDB_RUN_NAME = "CV_PhysVideoGenerator"  # Auto-generated if None
     WANDB_MODE = "online"  # "online", "offline", or "disabled"
     WANDB_LOG_INTERVAL = 10  # Log every N steps
     WANDB_SAVE_CODE = True  # Save this script to wandb
+    WANDB_API_KEY = "61b31217f6c3fee5fd570133a1a777e3bf035c7c"
+
+# ============================================================================
+# WANDB LOGIN
+# ============================================================================
+wandb.login(key=Config.WANDB_API_KEY)
 
 # ============================================================================
 # CHECK DEPENDENCIES
