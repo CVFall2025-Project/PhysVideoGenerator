@@ -196,7 +196,7 @@ def run_text_encoding_batch(paths: Dict[str, str]) -> Dict[str, str]:
     encoded_video_path_list = os.listdir(paths["encoded_vae"])
     video_ids = set([fname[:-8] for fname in encoded_video_path_list])
 
-    model_name = "t5-v1_1-xxl"
+    model_name = "google/t5-v1_1-xxl"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     text_encoder = TextEncoder(model_name=model_name, device=device)
     
