@@ -80,9 +80,9 @@ class Config:
     WANDB_PROJECT = "physics-video-diffusion"
     WANDB_ENTITY = "sk12590"  # Set to your wandb username/team if needed
     WANDB_RUN_NAME = "CV_PhysVideoGenerator"  # Auto-generated if None
-    WANDB_MODE = "online"  # "online", "offline", or "disabled"
+    WANDB_MODE = "offline"  # "online", "offline", or "disabled"
     WANDB_LOG_INTERVAL = 10  # Log every N steps
-    WANDB_SAVE_CODE = True  # Save this script to wandb
+    WANDB_SAVE_CODE = False  # Save this script to wandb
     WANDB_API_KEY = "61b31217f6c3fee5fd570133a1a777e3bf035c7c"
 
 # ============================================================================
@@ -616,6 +616,10 @@ def train(config: Config):
             "model_name": config.MODEL_NAME,
         },
         mode=config.WANDB_MODE,
+        settings=wandb.Settings(  # ← Add this
+            _disable_stats=True,  # Disable system stats monitoring
+            _disable_meta=True,   # Disable metadata collection
+        ),
         save_code=config.WANDB_SAVE_CODE,
     )
     
