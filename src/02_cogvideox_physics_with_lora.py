@@ -470,7 +470,7 @@ class CogVideoXWithPhysics(nn.Module):
             output = output.permute(0, 1, 5, 4, 2, 6, 3, 7).flatten(6, 7).flatten(4, 5).flatten(1, 2)
         
         # Convert back to [B, C, T, H, W] format
-        output = output.permute(0, 2, 1, 3, 4)  # [B, T, C, H, W] -> [B, C, T, H, W]
+        output = output.permute(0, 2, 1, 3, 4).contiguous()  # [B, T, C, H, W] -> [B, C, T, H, W]
         
         if not return_dict:
             return (output,)
