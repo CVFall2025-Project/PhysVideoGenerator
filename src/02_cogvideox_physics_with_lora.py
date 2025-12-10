@@ -59,7 +59,7 @@ class Config:
     LATENT_W = 90
     
     DIM_T = 256
-    HIDDEN_DIM = 1024 
+    HIDDEN_DIM = 4096 
     
     # Model
     MODEL_NAME = "THUDM/CogVideoX-2b"
@@ -204,7 +204,10 @@ class PredictorP(nn.Module):
         
         # Calculate positional embedding size dynamically based on config
         # After stride=2 convolution: T/2, H/2, W/2
-        pos_embed_seq_len = (config.LATENT_T // 2) * (config.LATENT_H // 2) * (config.LATENT_W // 2)
+        latent_t_out = (config.LATENT_T - 1) // 2 + 1
+        latent_h_out = (config.LATENT_H - 1) // 2 + 1
+        latent_w_out = (config.LATENT_W - 1) // 2 + 1
+        pos_embed_seq_len = latent_t_out * latent_h_out * latent_w_out
         self.latent_pos_embed = nn.Parameter(torch.randn(1, pos_embed_seq_len, latent_dim) * 0.02)
         self.latent_to_hidden = nn.Linear(latent_dim, config.HIDDEN_DIM)
         
