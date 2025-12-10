@@ -177,7 +177,7 @@ def run_streaming_pipeline(
         run_text_encoding_batch(paths)
     
     # Build index
-    build_index(paths, processed_videos)
+    build_index(paths)
     
     return {"processed": processed_videos}
 
@@ -222,10 +222,13 @@ def run_text_encoding_batch(paths: Dict[str, str]) -> Dict[str, str]:
     return saved_map
 
 
-def build_index(paths: Dict[str, str], video_ids: list) -> None:
+def build_index(paths: Dict[str, str]) -> None:
     """Build index file for processed videos."""
     logger.info("Building indexed dataset")
     index_file = paths["index_file"]
+    
+    encoded_video_path_list = os.listdir(paths["encoded_vae"])
+    video_ids = set([fname[:-8] for fname in encoded_video_path_list])
     
     json_entries = []
     for video_id in sorted(video_ids):
