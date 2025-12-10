@@ -501,8 +501,25 @@ class VideoPhysicsDataset(Dataset):
     
     def _load_sample(self, idx):
         sample_info = self.data_index[idx]
-        z0 = torch.from_numpy(np.load(sample_info['vae'])).float()
-        vfm_tokens = torch.from_numpy(np.load(sample_info['vjepa'])).float()
+        
+        vae_npz = np.load(sample_info['vae'])
+        if 'arr_0' in vae_npz:
+            z0 = vae_npz['arr_0']
+        elif 'frames' in vae_npz:
+            z0 = vae_npz['latents']
+        else:
+            z0 = vae_npz[vae_npz.files[0]]
+        z0 = torch.from_numpy(z0).float()
+
+        vjepa_npz = np.load(sample_info['vjepa'])
+        if 'arr_0' in vae_npz:
+            vfm_tokens = vjepa_npz['arr_0']
+        elif 'frames' in vae_npz:
+            vfm_tokens = vjepa_npz['latents']
+        else:
+            vfm_tokens = vjepa_npz[vjepa_npz.files[0]]
+        vfm_tokens = torch.from_numpy(vfm_tokens).float()
+        
         text_tokens = torch.from_numpy(np.load(sample_info['text'])).float()
         return z0, vfm_tokens, text_tokens
     
