@@ -130,45 +130,47 @@ def run_streaming_pipeline(
     logger.info(f"Using device: {device}")
     
     # Initialize encoders once
-    vae_encoder = VAEEncoder("THUDM/CogVideoX-2b", torch_dtype=torch.float32, device=device) if do_vae else None
-    vjepa_encoder = VJEPA2Encoder(model_name="facebook/vjepa2-vitg-fpc64-256", torch_dtype=torch.float32, device=device) if do_vjepa else None
-    processor = clean_videos.VideoProcessor(device=device)
-    
-    processed_videos = []
-    
-    # Process videos present in the `raw_videos` folder (downloader runs separately)
-    if not os.path.exists(paths["raw_videos"]):
-        logger.error(f"Raw videos directory not found: {paths['raw_videos']}. Place videos there or run downloader first.")
-        return {"processed": processed_videos}
+    if (do_vae and do_vjepa):
 
-    video_files = sorted([
-        f for f in os.listdir(paths["raw_videos"]) if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
-    ])
+        vae_encoder = VAEEncoder("THUDM/CogVideoX-2b", torch_dtype=torch.float32, device=device)
+        vjepa_encoder = VJEPA2Encoder(model_name="facebook/vjepa2-vitg-fpc64-256", torch_dtype=torch.float32, device=device)
+        processor = clean_videos.VideoProcessor(device=device)
+        
+        processed_videos = []
+        
+        # Process videos present in the `raw_videos` folder (downloader runs separately)
+        if not os.path.exists(paths["raw_videos"]):
+            logger.error(f"Raw videos directory not found: {paths['raw_videos']}. Place videos there or run downloader first.")
+            return {"processed": processed_videos}
 
-    if limit is not None:
-        video_files = video_files[:limit]
+        video_files = sorted([
+            f for f in os.listdir(paths["raw_videos"]) if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
+        ])
 
-    logger.info(f"Processing {len(video_files)} videos from {paths['raw_videos']}")
+        if limit is not None:
+            video_files = video_files[:limit]
 
-    for video_file in tqdm(video_files, desc="Processing videos"):
-        video_path = os.path.join(paths["raw_videos"], video_file)
-        base_name, success = process_video_full(
-            video_path,
-            vae_encoder,
-            vjepa_encoder,
-            processor,
-            paths,
-        )
-        if success:
-            processed_videos.append(base_name)
+        logger.info(f"Processing {len(video_files)} videos from {paths['raw_videos']}")
 
-    # Delete raw video immediately after processing
-    delete_command = "rm -rf " + paths["raw_videos"] + "/*.mp4"
-    os.system(delete_command)
-    
-    logger.info(f"\n{'='*60}")
-    logger.info(f"Streaming encoding complete. Processed {len(processed_videos)} videos total.")
-    logger.info(f"{'='*60}")
+        for video_file in tqdm(video_files, desc="Processing videos"):
+            video_path = os.path.join(paths["raw_videos"], video_file)
+            base_name, success = process_video_full(
+                video_path,
+                vae_encoder,
+                vjepa_encoder,
+                processor,
+                paths,
+            )
+            if success:
+                processed_videos.append(base_name)
+
+        # Delete raw video immediately after processing
+        delete_command = "rm -rf " + paths["raw_videos"] + "/*.mp4"
+        os.system(delete_command)
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Streaming encoding complete. Processed {len(processed_videos)} videos total.")
+        logger.info(f"{'='*60}")
     
     # Encode text captions if requested (do this after all video processing)
     if do_text:
