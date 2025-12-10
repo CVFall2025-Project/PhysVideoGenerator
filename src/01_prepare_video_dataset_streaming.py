@@ -252,11 +252,14 @@ def build_index(paths: Dict[str, str]) -> None:
         }
         json_entries.append(entry)
     
-    with open(index_file, "r") as outf:
-        try:
-            existing_data = json.load(outf)
-        except json.JSONDecodeError:
-            existing_data = []
+    if not os.path.exists(index_file):
+        existing_data = []
+    else:
+        with open(index_file, "r") as outf:
+            try:
+                existing_data = json.load(outf)
+            except json.JSONDecodeError:
+                existing_data = []
     
     existing_data.extend(json_entries)
     
