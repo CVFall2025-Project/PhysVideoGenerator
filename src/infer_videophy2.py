@@ -4,6 +4,8 @@ import math
 import os
 from pathlib import Path
 from typing import List
+import pandas as pd
+from typing import List, Dict, Any
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +32,81 @@ from text_caption_enocder import TextEncoder   # adjust path if needed
 # ------------------------------------------------------------------------
 # Utility: load prompts (VideoPhy-2 style or simple list)
 # ------------------------------------------------------------------------
+def load_prompts_videophy2_csv(
+    csv_path: str,
+    use_upsampled: bool = True,
+    hard_only: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Load prompts from the *official* VideoPhy-2 test CSV from
+    `videophysics/videophy2_test`.
+
+    Expected columns (from HF):
+      - caption
+      - upsampled_caption
+      - action
+      - is_hard
+      - category
+      - ... (other metadata, ignored here)
+
+    Returns a list of dicts:
+      {
+        "id":       str,   # unique ID we construct
+        "prompt":   str,   # upsampled_caption or caption
+        "action":   str,
+        "category": str or None,
+        "is_hard":  int (0/1),
+      }
+    """
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"VideoPhy-2 CSV not found: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+
+    # Choose which text column to use
+    text_col = "upsampled_caption" if use_upsampled and "upsampled_caption" in df.columns else "caption"
+    if text_col not in df.columns:
+        raise ValueError(
+            f"Expected '{text_col}' column in {csv_path}, "
+            f"available columns: {list(df.columns)}"
+        )
+
+    # Optionally restrict to the "hard" subset
+    if hard_only and "is_hard" in df.columns:
+        df = df[df["is_hard"] == 1]
+
+    # Deduplicate prompts so we have one row per unique text description
+    df = df.drop_duplicates(subset=[text_col])
+
+    prompts: List[Dict[str, Any]] = []
+    for idx, row in df.iterrows():
+        prompt_text = str(row[text_col]).strip()
+        if not prompt_text:
+            continue
+
+        action = str(row.get("action", "")).strip() or None
+        category = str(row.get("category", "")).strip() or None
+        is_hard = int(row.get("is_hard", 0))
+
+        # Build a stable ID: action + running index
+        if action is not None:
+            pid = f"{action}_{idx}"
+        else:
+            pid = f"videophy2_{idx}"
+
+        prompts.append(
+            {
+                "id": pid,
+                "prompt": prompt_text,
+                "action": action,
+                "category": category,
+                "is_hard": is_hard,
+            }
+        )
+
+    return prompts
+'''
 def load_prompts(path: str) -> List[dict]:
     """
     Returns a list of dicts: {"id": str, "prompt": str}
@@ -66,6 +143,7 @@ def load_prompts(path: str) -> List[dict]:
                 raise ValueError(f"Cannot find prompt text in item {i}: {item}")
             prompts.append({"id": pid, "prompt": ptxt})
     return prompts
+'''
 
 
 # ------------------------------------------------------------------------
@@ -322,7 +400,13 @@ def main():
     )
 
     # 4) Load prompts
-    prompts = load_prompts(args.prompts)
+    prompts = load_prompts_videophy2_csv
+    (
+        args.prompts,
+        use_upsampled=True,   # match official benchmark
+        hard_only=False,      # set True if you want only the hard subset
+    )
+    # prompts = load_prompts(args.prompts)
     print(f"Loaded {len(prompts)} prompts.")
 
     out_dir = Path(args.output_dir)
