@@ -24,7 +24,7 @@ from diffusers import AutoencoderKLCogVideoX
 # Local imports – assumes this file lives in src/ and training file renamed
 # from 02_cogvideox_physics_with_lora.py -> cogvideox_physics_with_lora.py
 # ------------------------------------------------------------------------
-from 02_cogvideox_physics_with_lora import (  # type: ignore
+from cogvideox_physics_with_lora import (  # type: ignore
     Config,
     CogVideoXWithPhysics,
     PredictorP,
@@ -115,7 +115,16 @@ def load_prompts_videophy2_from_datasets(
 # ------------------------------------------------------------------------
 # Load trained model + predictor for inference
 # ------------------------------------------------------------------------
-def load_models_for_inference(config: Config, ckpt_path: str, device: str):
+def load_models_for_inference(config: Config, ckpt_path: str, device: str, use_checkpoint: bool = True, load_lora: bool = True,):
+    vdm = CogVideoXWithPhysics(config).to(device)
+    predictor = PredictorP(config).half().to(device)
+
+    if not use_checkpoint:
+        print("Sanity-check mode: using randomly initialized weights (no checkpoint).")
+        vdm.eval()
+        predictor.eval()
+        return vdm, predictor
+
     ckpt_path = Path(ckpt_path)
     assert ckpt_path.exists(), f"Checkpoint not found: {ckpt_path}"
 
@@ -207,7 +216,8 @@ def ddpm_sample(
 
     # We will sample all steps T-1 -> 0
     # (For now ignore num_steps < T_STEPS; keep them equal)
-    assert num_steps == config.T_STEPS, "For now, set num_steps == config.T_STEPS for consistency."
+    if num_steps != 1:
+        assert num_steps == config.T_STEPS, "For now, set num_steps == config.T_STEPS for consistency."
 
     # Init latent with Gaussian noise
     z = torch.randn(
@@ -326,6 +336,12 @@ def main():
         default=None,
         help="Number of DDPM steps (default: use config.T_STEPS).",
     )
+    parser.add_argument(
+    "--dry_run",
+    action="store_true",
+    help="Sanity check: skip checkpoint/LoRA, run a single prompt with 1 step.",
+    )
+
     args = parser.parse_args()
 
     config = Config()
@@ -338,7 +354,7 @@ def main():
         num_steps = args.num_steps
 
     # 1) Load models
-    vdm, predictor = load_models_for_inference(config, args.checkpoint, device)
+    vdm, predictor = load_models_for_inference(config, args.checkpoint, device, use_checkpoint=not args.dry_run, load_lora=not args.dry_run,)
     dtype = next(vdm.parameters()).dtype
 
     # 2) Load VAE for decoding
@@ -356,7 +372,19 @@ def main():
         model_name="google/t5-v1_1-xxl",
         device=device,
     )
-
+    if args.dry_run:
+    # Single toy prompt so we don't hit HF dataset or loop over everything
+        prompts = [{"id": "sanity_test", "prompt": "a ball rolling on a flat table"}]
+        print("Dry run: using a single dummy prompt.")
+    else:
+        prompts = load_prompts_videophy2_from_datasets(
+            split="test",
+            use_upsampled=True,
+            hard_only=args.hard_only,
+            dedup=False,
+         )
+    print(f"Loaded {len(prompts)} prompts.")
+    '''
     # 4) Load prompts
     prompts = load_prompts_videophy2_from_datasets(
         split="test",
@@ -365,7 +393,7 @@ def main():
         dedup=False,
     )
     print(f"Loaded {len(prompts)} prompts.")
-
+    '''
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -384,7 +412,7 @@ def main():
         )
         # Move to device & match dtype
         text_tokens = text_tokens.to(device=device, dtype=dtype)
-
+        this_num_steps = 1 if args.dry_run else num_steps
         # DDPM sampling in latent space
         latents = ddpm_sample(
             vdm,
@@ -392,7 +420,7 @@ def main():
             config,
             text_tokens,
             device,
-            num_steps=num_steps,
+            num_steps=this_num_steps,
         )
 
         # Decode to video and save
@@ -400,6 +428,9 @@ def main():
         out_path = out_dir / f"{pid}.mp4"
         save_video(video, out_path, fps=12)
         print(f"Saved video to {out_path}")
+        if args.dry_run:
+            print("Dry run complete, exiting after first sample.")
+            break
 
     print("Done.")
 
