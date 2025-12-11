@@ -144,6 +144,7 @@ def sinusoidal_timestep_embedding(t: torch.Tensor, dim: int):
     emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
     if dim % 2 == 1:
         emb = F.pad(emb, (0, 1))
+    emb = emb.half()
     return emb
 
 # ============================================================================
@@ -395,6 +396,9 @@ class CogVideoXWithPhysics(nn.Module):
             modified_block = CogVideoXBlockWithPhysics(original_block, physics_attn)
             new_blocks.append(modified_block)
             self.physics_attns.append(physics_attn)
+        
+        for physics_attn in self.physics_attns:
+            physics_attn.half()
         
         self.transformer.transformer_blocks = new_blocks
         print(f"✓ Injected physics attention into {len(self.physics_attns)} blocks")
@@ -654,6 +658,8 @@ def train(config: Config):
     alpha_bar = alpha_bar.to(device, dtype=torch.float16)
     
     vdm = CogVideoXWithPhysics(config).to(device)
+    vdm = vdm.half()
+
     predictor = PredictorP(config)
     predictor = predictor.half().to(device)
     
