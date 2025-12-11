@@ -361,7 +361,8 @@ class CogVideoXWithPhysics(nn.Module):
             subfolder="transformer",
             torch_dtype=torch.float16
         )
-        self.transformer.gradient_checkpointing_enable()
+
+        # self.transformer.gradient_checkpointing_enable()
 
         print("Configuring LoRA adapters...")
         lora_config = LoraConfig(
@@ -650,7 +651,7 @@ def train(config: Config):
     device = torch.device(config.DEVICE)
     
     betas, alphas, alpha_bar = make_beta_schedule(config.T_STEPS)
-    alpha_bar = alpha_bar.to(device)
+    alpha_bar = alpha_bar.to(device, dtype=torch.float16)
     
     vdm = CogVideoXWithPhysics(config).to(device)
     predictor = PredictorP(config)
@@ -713,9 +714,9 @@ def train(config: Config):
         num_batches = 0
         
         for z0, vfm_tokens, text_tokens in dataloader:
-            z0 = z0.to(device)
-            vfm_tokens = vfm_tokens.to(device)
-            text_tokens = text_tokens.to(device)
+            z0 = z0.to(device, dtype=torch.float16)
+            vfm_tokens = vfm_tokens.to(device, dtype=torch.float16)
+            text_tokens = text_tokens.to(device, dtype=torch.float16)
             
             B = z0.size(0)
             t = torch.randint(0, config.T_STEPS, (B,), device=device)
