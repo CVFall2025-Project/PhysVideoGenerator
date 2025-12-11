@@ -140,7 +140,7 @@ def sinusoidal_timestep_embedding(t: torch.Tensor, dim: int):
     half_dim = dim // 2
     emb = math.log(10000) / (half_dim - 1)
     emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
-    emb = t.float()[:, None] * emb[None, :]
+    emb = t.float().half()[:, None] * emb[None, :]
     emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
     if dim % 2 == 1:
         emb = F.pad(emb, (0, 1))
@@ -361,7 +361,8 @@ class CogVideoXWithPhysics(nn.Module):
             subfolder="transformer",
             torch_dtype=torch.float16
         )
-        
+        self.transformer.gradient_checkpointing_enable()
+
         print("Configuring LoRA adapters...")
         lora_config = LoraConfig(
             r=config.LORA_RANK,
@@ -372,8 +373,6 @@ class CogVideoXWithPhysics(nn.Module):
         )
         
         self.transformer = get_peft_model(self.transformer, lora_config)
-
-        self.transformer.gradient_checkpointing_enable()
         
         trainable_params = sum(p.numel() for p in self.transformer.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in self.transformer.parameters())
@@ -654,7 +653,8 @@ def train(config: Config):
     alpha_bar = alpha_bar.to(device)
     
     vdm = CogVideoXWithPhysics(config).to(device)
-    predictor = PredictorP(config).to(device)
+    predictor = PredictorP(config)
+    predictor = predictor.half().to(device)
     
     trainable_params = vdm.get_trainable_parameters() + list(predictor.parameters())
     
