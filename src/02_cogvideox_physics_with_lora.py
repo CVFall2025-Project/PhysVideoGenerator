@@ -400,9 +400,10 @@ class CogVideoXWithPhysics(nn.Module):
                 modified_block = original_block
             new_blocks.append(modified_block)
             
-        
-        # for physics_attn in self.physics_attns:
-        #     physics_attn.half()
+        self.transformer.to(torch.bfloat16)
+
+        for physics_attn in self.physics_attns:
+            physics_attn.to(torch.bfloat16)
         
         self.transformer.transformer_blocks = new_blocks
         print(f"✓ Injected physics attention into {len(self.physics_attns)} blocks")
@@ -678,7 +679,10 @@ def train(config: Config):
     # device = torch.device(config.DEVICE)
 
     vdm = CogVideoXWithPhysics(config)
+    vdm = vdm.to(torch.bfloat16)
+
     predictor = PredictorP(config)
+    predictor = predictor.to(torch.bfloat16)
 
     trainable_params = vdm.get_trainable_parameters() + list(predictor.parameters())
 
