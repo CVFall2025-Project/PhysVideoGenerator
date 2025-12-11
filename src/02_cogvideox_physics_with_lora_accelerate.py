@@ -92,11 +92,6 @@ class Config:
     WANDB_API_KEY = "61b31217f6c3fee5fd570133a1a777e3bf035c7c"
 
 # ============================================================================
-# WANDB LOGIN
-# ============================================================================
-# wandb.login(key=Config.WANDB_API_KEY)
-
-# ============================================================================
 # CHECK DEPENDENCIES
 # ============================================================================
 try:
@@ -625,45 +620,6 @@ def load_checkpoint(vdm, predictor, optimizer, checkpoint_path, device):
 # TRAINING
 # ============================================================================
 def train(config: Config):
-    # ========== WANDB: Initialize (ADDED) ==========
-    # wandb.init(
-    #     project=config.WANDB_PROJECT,
-    #     entity=config.WANDB_ENTITY,
-    #     name=config.WANDB_RUN_NAME,
-    #     config={
-    #         # Model config
-    #         "batch_size": config.BATCH_SIZE,
-    #         "epochs": config.EPOCHS,
-    #         "learning_rate": config.ADAPTER_LR,
-    #         "predictor_lr": config.P_LR,
-    #         "weight_decay": config.WEIGHT_DECAY,
-    #         "lambda_pred": config.LAMBDA_PRED,
-    #         "max_grad_norm": config.MAX_GRAD_NORM,
-            
-    #         # LoRA config
-    #         "lora_rank": config.LORA_RANK,
-    #         "lora_alpha": config.LORA_ALPHA,
-    #         "lora_dropout": config.LORA_DROPOUT,
-            
-    #         # Model dimensions
-    #         "vfm_seq_len": config.VFM_SEQ_LEN,
-    #         "vfm_dim": config.VFM_DIM,
-    #         "hidden_dim": config.HIDDEN_DIM,
-            
-    #         # Diffusion
-    #         "t_steps": config.T_STEPS,
-            
-    #         # Model
-    #         "model_name": config.MODEL_NAME,
-    #     },
-    #     mode=config.WANDB_MODE,
-    #     settings=wandb.Settings(  # ← Add this
-    #         _disable_stats=True,  # Disable system stats monitoring
-    #         _disable_meta=True,   # Disable metadata collection
-    #     ),
-    #     save_code=config.WANDB_SAVE_CODE,
-    # )
-
     fsdp_plugin = FullyShardedDataParallelPlugin(
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         mixed_precision_policy=None, # Accelerate handles this from config
@@ -708,45 +664,6 @@ def train(config: Config):
 
     optimizer = AdamW(trainable_params, lr=config.ADAPTER_LR, weight_decay=config.WEIGHT_DECAY)
     
-    # vdm = CogVideoXWithPhysics(config).to(device)
-    # vdm = vdm.half()
-
-    # predictor = PredictorP(config)
-    # predictor = predictor.half().to(device)
-    
-    # ========== WANDB: Log parameter counts (ADDED) ==========
-    # vdm_trainable = sum(p.numel() for p in vdm.get_trainable_parameters())
-    # predictor_trainable = sum(p.numel() for p in predictor.parameters())
-    # total_trainable = vdm_trainable + predictor_trainable
-    
-    # wandb.config.update({
-    #     "vdm_trainable_params": vdm_trainable,
-    #     "predictor_trainable_params": predictor_trainable,
-    #     "total_trainable_params": total_trainable,
-    # })
-    
-    # logging.info(f"VDM trainable params: {vdm_trainable:,}")
-    # logging.info(f"Predictor trainable params: {predictor_trainable:,}")
-    # logging.info(f"Total trainable params: {total_trainable:,}")
-    
-    # if config.USE_8BIT_ADAM:
-    #     try:
-    #         import bitsandbytes as bnb
-    #         optimizer = bnb.optim.AdamW8bit(trainable_params, lr=config.ADAPTER_LR, 
-    #                                        weight_decay=config.WEIGHT_DECAY)
-    #         logging.info("Using 8-bit AdamW optimizer")
-    #     except ImportError:
-    #         optimizer = AdamW(trainable_params, lr=config.ADAPTER_LR, weight_decay=config.WEIGHT_DECAY)
-    #         logging.info("8-bit AdamW not available, using standard AdamW")
-    # else:
-    #     optimizer = AdamW(trainable_params, lr=config.ADAPTER_LR, weight_decay=config.WEIGHT_DECAY)
-    
-    # start_epoch = 0
-    # start_step = 0
-    # if config.RESUME_FROM_CHECKPOINT:
-    #     start_epoch, start_step = load_checkpoint(vdm, predictor, optimizer, 
-    #                                               config.RESUME_FROM_CHECKPOINT, accelerator.device)
-    
     dataset = VideoPhysicsDataset(config.DATASET_INDEX, config, cache_in_memory=False)
     dataloader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True, 
                           num_workers=4, pin_memory=True)
@@ -758,12 +675,6 @@ def train(config: Config):
     betas, alphas, alpha_bar = make_beta_schedule(config.T_STEPS)
     alpha_bar = alpha_bar.to(accelerator.device)
     
-    # ========== WANDB: Log dataset info (ADDED) ==========
-    # wandb.config.update({
-    #     "dataset_size": len(dataset),
-    #     "num_batches_per_epoch": len(dataloader),
-    # })
-    
     # global_step = start_step
     global_step = 0
     start_epoch = 0
@@ -771,11 +682,6 @@ def train(config: Config):
     for epoch in range(start_epoch, config.EPOCHS):
         vdm.train()
         predictor.train()
-        
-        # epoch_loss = 0.0
-        # epoch_l_diff = 0.0
-        # epoch_l_pred = 0.0
-        # num_batches = 0
         
         for batch in dataloader:
             z0, vfm_tokens, text_tokens = batch
@@ -834,86 +740,6 @@ def train(config: Config):
                     logging.info(f"Saved to {save_path}")
             
             global_step += 1
-
-        # for z0, vfm_tokens, text_tokens in dataloader:
-        #     z0 = z0.to(device, dtype=torch.float16)
-        #     vfm_tokens = vfm_tokens.to(device, dtype=torch.float16)
-        #     text_tokens = text_tokens.to(device, dtype=torch.float16)
-            
-        #     B = z0.size(0)
-        #     t = torch.randint(0, config.T_STEPS, (B,), device=device)
-            
-        #     z_t, noise = q_sample(z0, t, alpha_bar)
-            
-        #     t_emb = sinusoidal_timestep_embedding(t, config.DIM_T)
-        #     predicted_vfm = predictor(z_t, text_tokens, t_emb)
-            
-        #     eps_hat = vdm(
-        #         hidden_states=z_t,
-        #         encoder_hidden_states=text_tokens,
-        #         timestep=t,
-        #         predicted_vfm=predicted_vfm
-        #     ).sample
-            
-        #     L_diff = F.mse_loss(eps_hat, noise)
-        #     L_pred = F.mse_loss(predicted_vfm, vfm_tokens)
-        #     loss = L_diff + config.LAMBDA_PRED * L_pred
-            
-        #     optimizer.zero_grad()
-        #     loss.backward()
-            
-        #     # ========== WANDB: Log gradient norm (ADDED) ==========
-        #     grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, config.MAX_GRAD_NORM)
-            
-        #     optimizer.step()
-            
-        #     # Accumulate metrics
-        #     epoch_loss += loss.item()
-        #     epoch_l_diff += L_diff.item()
-        #     epoch_l_pred += L_pred.item()
-        #     num_batches += 1
-            
-        #     # ========== WANDB: Log batch metrics (ADDED) ==========
-        #     if global_step % config.WANDB_LOG_INTERVAL == 0:
-        #         wandb.log({
-        #             "train/batch_loss": loss.item(),
-        #             "train/batch_l_diff": L_diff.item(),
-        #             "train/batch_l_pred": L_pred.item(),
-        #             "train/grad_norm": grad_norm.item(),
-        #             "train/learning_rate": optimizer.param_groups[0]['lr'],
-        #             "train/step": global_step,
-        #             "train/epoch": epoch,
-        #         })
-            
-        #     if global_step % config.LOG_EVERY == 0:
-        #         logging.info(
-        #             f"Epoch {epoch} Step {global_step} Loss: {loss.item():.4f} "
-        #             f"L_diff: {L_diff.item():.4f} L_pred: {L_pred.item():.4f}"
-        #         )
-            
-        #     if global_step % config.SAVE_EVERY == 0 and global_step > 0:
-        #         save_checkpoint(vdm, predictor, optimizer, epoch, global_step, config)
-            
-        #     global_step += 1
-        
-        # ========== WANDB: Log epoch metrics (ADDED) ==========
-        # avg_epoch_loss = epoch_loss / num_batches
-        # avg_epoch_l_diff = epoch_l_diff / num_batches
-        # avg_epoch_l_pred = epoch_l_pred / num_batches
-        
-        # wandb.log({
-        #     "train/epoch_loss": avg_epoch_loss,
-        #     "train/epoch_l_diff": avg_epoch_l_diff,
-        #     "train/epoch_l_pred": avg_epoch_l_pred,
-        #     "epoch": epoch,
-        # })
-        
-        # logging.info(
-        #     f"Epoch {epoch} Complete - Avg Loss: {avg_epoch_loss:.4f} "
-        #     f"Avg L_diff: {avg_epoch_l_diff:.4f} Avg L_pred: {avg_epoch_l_pred:.4f}"
-        # )
-        
-        # save_checkpoint(vdm, predictor, optimizer, epoch, global_step, config)
     
     logging.info("Training complete!")
     
