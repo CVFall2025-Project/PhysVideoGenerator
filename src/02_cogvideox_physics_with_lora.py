@@ -25,6 +25,7 @@ from functools import partial
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from accelerate import FullyShardedDataParallelPlugin
 from torch.distributed.fsdp import ShardingStrategy
+from torch.distributed.fsdp import CPUOffload
 
 # ============================================================================
 # CONFIG
@@ -368,6 +369,8 @@ class CogVideoXWithPhysics(nn.Module):
             torch_dtype=torch.float16
         )
 
+        self.transformer.set_attn_processor(torch.nn.functional.scaled_dot_product_attention)
+
         self.transformer.enable_gradient_checkpointing()
 
         print("Configuring LoRA adapters...")
@@ -668,6 +671,7 @@ def train(config: Config):
             transformer_auto_wrap_policy,
             transformer_layer_cls={CogVideoXBlockWithPhysics}, # <--- The Magic Fix
         ),
+        cpu_offload=CPUOffload(offload_params=True),
     )
 
     accelerator = Accelerator(
