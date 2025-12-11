@@ -363,7 +363,7 @@ class CogVideoXWithPhysics(nn.Module):
             torch_dtype=torch.float16
         )
 
-        # self.transformer.gradient_checkpointing_enable()
+        self.transformer.enable_gradient_checkpointing()
 
         print("Configuring LoRA adapters...")
         lora_config = LoraConfig(
@@ -386,16 +386,20 @@ class CogVideoXWithPhysics(nn.Module):
         original_blocks = self.transformer.transformer_blocks
         new_blocks = nn.ModuleList()
         
-        for original_block in original_blocks:
-            hidden_dim = original_block.attn1.to_q.in_features
-            physics_attn = PhysicsCrossAttention(
-                query_dim=hidden_dim,
-                context_dim=config.VFM_DIM,
-                num_heads=8
-            )
-            modified_block = CogVideoXBlockWithPhysics(original_block, physics_attn)
+        for i, original_block in enumerate(original_blocks):
+            if i % 3 == 0:
+                hidden_dim = original_block.attn1.to_q.in_features
+                physics_attn = PhysicsCrossAttention(
+                    query_dim=hidden_dim,
+                    context_dim=config.VFM_DIM,
+                    num_heads=8
+                )
+                modified_block = CogVideoXBlockWithPhysics(original_block, physics_attn)
+                self.physics_attns.append(physics_attn)
+            else:
+                modified_block = original_block
             new_blocks.append(modified_block)
-            self.physics_attns.append(physics_attn)
+            
         
         for physics_attn in self.physics_attns:
             physics_attn.half()
