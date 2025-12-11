@@ -139,8 +139,8 @@ def q_sample(z0: torch.Tensor, t: torch.Tensor, alpha_bar: torch.Tensor,
 def sinusoidal_timestep_embedding(t: torch.Tensor, dim: int):
     half_dim = dim // 2
     emb = math.log(10000) / (half_dim - 1)
-    emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
-    emb = t.float().half()[:, None] * emb[None, :]
+    emb = torch.exp(torch.arange(half_dim, device=t.device, dtype=torch.float16) * -emb)
+    emb = t.half()[:, None] * emb[None, :]
     emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
     if dim % 2 == 1:
         emb = F.pad(emb, (0, 1))
