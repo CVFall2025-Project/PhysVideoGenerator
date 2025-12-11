@@ -21,6 +21,11 @@ import wandb
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration, set_seed
 
+from functools import partial
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from accelerate import FullyShardedDataParallelPlugin
+from torch.distributed.fsdp import ShardingStrategy
+
 # ============================================================================
 # CONFIG
 # ============================================================================
@@ -655,10 +660,21 @@ def train(config: Config):
     #     ),
     #     save_code=config.WANDB_SAVE_CODE,
     # )
+
+    fsdp_plugin = FullyShardedDataParallelPlugin(
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        mixed_precision_policy=None, # Accelerate handles this from config
+        auto_wrap_policy=partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={CogVideoXBlockWithPhysics}, # <--- The Magic Fix
+        ),
+    )
+
     accelerator = Accelerator(
         mixed_precision="bf16",
         log_with="wandb",
-        project_dir=config.LOG_DIR
+        project_dir=config.LOG_DIR,
+        fsdp_plugin=fsdp_plugin
     )
 
     if accelerator.is_main_process:
