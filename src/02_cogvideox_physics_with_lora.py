@@ -446,14 +446,23 @@ class CogVideoXWithPhysics(nn.Module):
         
         # 3. Transformer blocks with physics attention
         for block in self.transformer.transformer_blocks:
-            hidden_states_patched, encoder_hidden_states_patched = block(
-                hidden_states=hidden_states_patched,
-                encoder_hidden_states=encoder_hidden_states_patched,
-                temb=emb,
-                image_rotary_emb=image_rotary_emb,
-                attention_kwargs=None,
-                physics_context=predicted_vfm,
-            )
+            if isinstance(block, CogVideoXBlockWithPhysics):
+                hidden_states_patched, encoder_hidden_states_patched = block(
+                    hidden_states=hidden_states_patched,
+                    encoder_hidden_states=encoder_hidden_states_patched,
+                    temb=emb,
+                    image_rotary_emb=image_rotary_emb,
+                    attention_kwargs=None,
+                    physics_context=predicted_vfm,
+                )
+            else:
+                hidden_states_patched, encoder_hidden_states_patched = block(
+                    hidden_states=hidden_states_patched,
+                    encoder_hidden_states=encoder_hidden_states_patched,
+                    temb=emb,
+                    image_rotary_emb=image_rotary_emb,
+                    attention_kwargs=None,
+                )
         
         # 4. Final normalization
         if not self.transformer.config.use_rotary_positional_embeddings:
