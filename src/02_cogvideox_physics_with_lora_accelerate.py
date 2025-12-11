@@ -47,8 +47,8 @@ class Config:
     RESUME_FROM_CHECKPOINT = None
     
     # LoRA Config
-    LORA_RANK = 64
-    LORA_ALPHA = 64
+    LORA_RANK = 32
+    LORA_ALPHA = 32
     LORA_DROPOUT = 0.0
     LORA_TARGET_MODULES = [
         "to_q", "to_k", "to_v", "to_out.0",
@@ -626,8 +626,7 @@ def train(config: Config):
         auto_wrap_policy=partial(
             transformer_auto_wrap_policy,
             transformer_layer_cls={CogVideoXBlockWithPhysics}, # <--- The Magic Fix
-        ),
-        cpu_offload=CPUOffload(offload_params=True),
+        )
     )
 
     accelerator = Accelerator(

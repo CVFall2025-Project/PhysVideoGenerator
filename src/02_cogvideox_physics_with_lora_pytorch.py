@@ -38,8 +38,8 @@ class Config:
     RESUME_FROM_CHECKPOINT = None
     
     # LoRA Config
-    LORA_RANK = 64
-    LORA_ALPHA = 64
+    LORA_RANK = 32
+    LORA_ALPHA = 32
     LORA_DROPOUT = 0.0
     LORA_TARGET_MODULES = [
         "to_q", "to_k", "to_v", "to_out.0",
@@ -59,7 +59,7 @@ class Config:
     LATENT_W = 90
     
     DIM_T = 256
-    HIDDEN_DIM = 4096 
+    PREDICTOR_HIDDEN_DIM = 1024 
     
     # Model
     MODEL_NAME = "THUDM/CogVideoX-2b"
@@ -210,46 +210,46 @@ class PredictorP(nn.Module):
         latent_w_out = (config.LATENT_W - 1) // 2 + 1
         pos_embed_seq_len = latent_t_out * latent_h_out * latent_w_out
         self.latent_pos_embed = nn.Parameter(torch.randn(1, pos_embed_seq_len, latent_dim) * 0.02)
-        self.latent_to_hidden = nn.Linear(latent_dim, config.HIDDEN_DIM)
+        self.latent_to_hidden = nn.Linear(latent_dim, config.PREDICTOR_HIDDEN_DIM)
         
         self.text_proj = nn.Sequential(
-            nn.Linear(config.TEXT_DIM, config.HIDDEN_DIM),
-            nn.LayerNorm(config.HIDDEN_DIM),
+            nn.Linear(config.TEXT_DIM, config.PREDICTOR_HIDDEN_DIM),
+            nn.LayerNorm(config.PREDICTOR_HIDDEN_DIM),
             nn.GELU()
         )
         
         self.time_proj = nn.Sequential(
-            nn.Linear(config.DIM_T, config.HIDDEN_DIM),
-            nn.LayerNorm(config.HIDDEN_DIM),
+            nn.Linear(config.DIM_T, config.PREDICTOR_HIDDEN_DIM),
+            nn.LayerNorm(config.PREDICTOR_HIDDEN_DIM),
             nn.GELU()
         )
         
         self.fusion_attn = nn.ModuleList([
-            nn.MultiheadAttention(config.HIDDEN_DIM, num_heads=8, batch_first=True)
+            nn.MultiheadAttention(config.PREDICTOR_HIDDEN_DIM, num_heads=8, batch_first=True)
             for _ in range(2)
         ])
         self.fusion_norms = nn.ModuleList([
-            nn.LayerNorm(config.HIDDEN_DIM) for _ in range(2)
+            nn.LayerNorm(config.PREDICTOR_HIDDEN_DIM) for _ in range(2)
         ])
         
         self.vfm_queries = nn.Parameter(torch.randn(1, config.VFM_SEQ_LEN, config.HIDDEN_DIM) * 0.02)
         self.vfm_decoder = nn.ModuleList([
-            nn.MultiheadAttention(config.HIDDEN_DIM, num_heads=8, batch_first=True)
+            nn.MultiheadAttention(config.PREDICTOR_HIDDEN_DIM, num_heads=8, batch_first=True)
             for _ in range(3)
         ])
         self.vfm_norms = nn.ModuleList([
-            nn.LayerNorm(config.HIDDEN_DIM) for _ in range(3)
+            nn.LayerNorm(config.PREDICTOR_HIDDEN_DIM) for _ in range(3)
         ])
         self.vfm_ffn = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(config.HIDDEN_DIM, config.HIDDEN_DIM * 4),
+                nn.Linear(config.PREDICTOR_HIDDEN_DIM, config.PREDICTOR_HIDDEN_DIM * 4),
                 nn.GELU(),
                 nn.Dropout(0.1),
-                nn.Linear(config.HIDDEN_DIM * 4, config.HIDDEN_DIM)
+                nn.Linear(config.PREDICTOR_HIDDEN_DIM * 4, config.PREDICTOR_HIDDEN_DIM)
             ) for _ in range(3)
         ])
         
-        self.vfm_out_proj = nn.Linear(config.HIDDEN_DIM, config.VFM_DIM)
+        self.vfm_out_proj = nn.Linear(config.PREDICTOR_HIDDEN_DIM, config.VFM_DIM)
         
     def forward(self, z_t: torch.Tensor, text_tokens: torch.Tensor, t_emb: torch.Tensor):
         """
@@ -387,7 +387,7 @@ class CogVideoXWithPhysics(nn.Module):
         new_blocks = nn.ModuleList()
         
         for i, original_block in enumerate(original_blocks):
-            if i % 3 == 0:
+            if i % 5 == 0:
                 hidden_dim = original_block.attn1.to_q.in_features
                 physics_attn = PhysicsCrossAttention(
                     query_dim=hidden_dim,
