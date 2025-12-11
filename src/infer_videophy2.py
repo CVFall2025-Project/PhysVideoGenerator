@@ -2,9 +2,9 @@ import argparse
 import json
 import math
 import os
+import sys
 from pathlib import Path
-from typing import List, Dict, Any
-
+from typing import List, Dict, Any, Optional
 import numpy as np
 import torch
 import torch.nn.functional as F  # only needed if you add metrics
@@ -34,6 +34,7 @@ from 02_cogvideox_physics_with_lora import (  # type: ignore
 
 # Match the dataset pipeline usage exactly
 # (see 01_prepare_video_dataset.py / _streaming.py)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.encoders.text_caption_enocder import TextEncoder  # type: ignore
 
 # ------------------------------------------------------------------------
@@ -184,7 +185,7 @@ def ddpm_sample(
     config: Config,
     text_tokens: torch.Tensor,
     device: str,
-    num_steps: int | None = None,
+    num_steps: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Run DDPM sampling in latent space.
