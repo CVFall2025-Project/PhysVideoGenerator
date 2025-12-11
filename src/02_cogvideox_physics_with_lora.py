@@ -739,10 +739,10 @@ def train(config: Config):
     alpha_bar = alpha_bar.to(accelerator.device)
     
     # ========== WANDB: Log dataset info (ADDED) ==========
-    wandb.config.update({
-        "dataset_size": len(dataset),
-        "num_batches_per_epoch": len(dataloader),
-    })
+    # wandb.config.update({
+    #     "dataset_size": len(dataset),
+    #     "num_batches_per_epoch": len(dataloader),
+    # })
     
     # global_step = start_step
     global_step = 0
