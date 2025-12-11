@@ -7,7 +7,7 @@ from typing import List
 import pandas as pd
 from typing import List, Dict, Any
 from huggingface_hub import hf_hub_download
-
+from datasets import load_dataset
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -33,74 +33,81 @@ from text_caption_enocder import TextEncoder   # adjust path if needed
 # ------------------------------------------------------------------------
 # Utility: load prompts (VideoPhy-2 style or simple list)
 # ------------------------------------------------------------------------
-def load_prompts_videophy2_csv(
+def load_prompts_videophy2_from_datasets(
+    split: str = "test",
     use_upsampled: bool = True,
     hard_only: bool = False,
-    repo_id: str = "videophysics/videophy2_test",
-    filename: str = "videophy2_test.csv",
+    dedup: bool = False,
 ) -> List[Dict[str, Any]]:
     """
-    Load prompts from the *official* VideoPhy-2 test CSV from
-    `videophysics/videophy2_test`.
+    Load prompts from the official VideoPhy-2 upsampled prompts dataset:
+        videophysics/videophy2_upsampled_prompts
 
-    Expected columns (from HF):
-      - caption
-      - upsampled_caption
-      - action
-      - is_hard
-      - category
-      - ... (other metadata, ignored here)
+    Requires: `huggingface-cli login` done once on this machine.
 
     Returns a list of dicts:
-      {
-        "id":       str,   # unique ID we construct
-        "prompt":   str,   # upsampled_caption or caption
-        "action":   str,
-        "category": str or None,
-        "is_hard":  int (0/1),
-      }
+        {
+            "id":       str,
+            "prompt":   str,
+            "action":   Optional[str],
+            "category": Optional[str],
+            "is_hard":  int (0/1),
+        }
     """
-    print(f"Downloading VideoPhy-2 CSV from HF: {repo_id}/{filename}")
-    csv_path = hf_hub_download(repo_id=repo_id, filename=filename)
-    print(f"Downloaded to {csv_path")
-    if not csv_path.exists():
-        raise FileNotFoundError(f"VideoPhy-2 CSV not found: {csv_path}")
+    ds = load_dataset("videophysics/videophy2_upsampled_prompts", split=split)
 
-    df = pd.read_csv(csv_path)
+    # Choose which text field to use
+    text_col = "upsampled_caption" if use_upsampled and "upsampled_caption" in ds.column_names else "caption"
+    if text_col not in ds.column_names:
+        raise ValueError(f"Text column {text_col} not found. Available: {ds.column_names}")
 
-    # Choose which text column to use
-    text_col = "upsampled_caption" if use_upsampled and "upsampled_caption" in df.columns else "caption"
-    if text_col not in df.columns:
-        raise ValueError(
-            f"Expected '{text_col}' column in {csv_path}, "
-            f"available columns: {list(df.columns)}"
-        )
+    prompts: List[Dict[str, Any]] = []
+    seen_texts = set()  # for optional dedup
 
-    # Optionally restrict to the "hard" subset
-    if hard_only and "is_hard" in df.columns:
-        df = df[df["is_hard"] == 1]
-
-    # Deduplicate prompts so we have one row per unique text description
-    df = df.drop_duplicates(subset=[text_col])
-
-    prompts = []
-    for idx, row in df.iterrows():
+    for idx, row in enumerate(ds):
         prompt = row[text_col]
+
+        # Skip missing / NaN prompts
+        if prompt is None:
+            continue
         if isinstance(prompt, float) and math.isnan(prompt):
             continue
 
-        pid = f"{row.get('action', 'videophy2')}_{idx}"
+        # Hard-only filter (if requested)
+        is_hard = int(row.get("is_hard", 0)) if "is_hard" in row else 0
+        if hard_only and not is_hard:
+            continue
+
+        prompt_str = str(prompt).strip()
+        if not prompt_str:
+            continue
+
+        if dedup:
+            if prompt_str in seen_texts:
+                continue
+            seen_texts.add(prompt_str)
+
+        action = row.get("action", None)
+        category = row.get("category", None)
+
+        # Build a stable ID: action prefix + index
+        action_prefix = action if (action is not None and action != "") else "videophy2"
+        pid = f"{action_prefix}_{idx}"
+
         prompts.append(
             {
                 "id": pid,
-                "prompt": str(prompt),
-                "action": row.get("action", None),
-                "category": row.get("category", None),
-                "is_hard": int(row.get("is_hard", 0)),
+                "prompt": prompt_str,
+                "action": action,
+                "category": category,
+                "is_hard": is_hard,
             }
         )
 
-    print(f"Loaded {len(prompts)} unique prompts.")
+    print(
+        f"Loaded {len(prompts)} prompts from split='{split}', "
+        f"hard_only={hard_only}, dedup={dedup}."
+    )
     return prompts
 '''
 def load_prompts(path: str) -> List[dict]:
@@ -341,38 +348,23 @@ def main():
         "--checkpoint",
         type=str,
         required=True,
-        help="Path to checkpoint_epoch*_step*.pt (physics + predictor).",
-    )
-    parser.add_argument(
-        "--prompts",
-        type=str,
-        required=True,
-        help="Path to prompts file (JSON or TXT).",
+        help="Path to checkpoint_epoch*_step*.pt",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default="samples_videophy2",
-        help="Where to save generated videos.",
     )
     parser.add_argument(
-        "--num_steps",
-        type=int,
-        default=None,
-        help="Number of diffusion steps to run (default: Config.T_STEPS).",
+        "--hard_only",
+        action="store_true",
+        help="If set, only use the 'hard' subset of VideoPhy-2 prompts.",
     )
-    parser.add_argument(
-        "--device", type=str, default=None, help="cuda or cpu (default: auto)"
-    )
+    # ... any other args (num_steps, device, etc.)
     args = parser.parse_args()
 
     config = Config()
-
-    device = (
-        args.device
-        if args.device is not None
-        else ("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
     # 1) Load models
@@ -396,10 +388,11 @@ def main():
     )
 
     # 4) Load prompts
-    prompts = load_prompts_videophy2_csv
-    (
-        use_upsampled=True,   # match official benchmark
-        hard_only=False,      # set True if you want only the hard subset
+    prompts = load_prompts_videophy2_from_datasets(
+        split="test",
+        use_upsampled=True,
+        hard_only=args.hard_only,
+        dedup=False,
     )
     # prompts = load_prompts(args.prompts)
     print(f"Loaded {len(prompts)} prompts.")
