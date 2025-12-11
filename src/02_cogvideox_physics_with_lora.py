@@ -359,7 +359,7 @@ class CogVideoXWithPhysics(nn.Module):
         self.transformer = CogVideoXTransformer3DModel.from_pretrained(
             config.MODEL_NAME,
             subfolder="transformer",
-            torch_dtype=torch.float32
+            torch_dtype=torch.float16
         )
         
         print("Configuring LoRA adapters...")
@@ -372,6 +372,8 @@ class CogVideoXWithPhysics(nn.Module):
         )
         
         self.transformer = get_peft_model(self.transformer, lora_config)
+
+        self.transformer.gradient_checkpointing_enable()
         
         trainable_params = sum(p.numel() for p in self.transformer.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in self.transformer.parameters())
@@ -515,7 +517,7 @@ class VideoPhysicsDataset(Dataset):
             z0 = vae_npz['latents']
         else:
             z0 = vae_npz[vae_npz.files[0]]
-        z0 = torch.from_numpy(z0).squeeze(0).float()
+        z0 = torch.from_numpy(z0).squeeze(0).to(torch.float16)
 
         vjepa_npz = np.load(sample_info['vjepa'])
         if 'arr_0' in vae_npz:
@@ -524,9 +526,9 @@ class VideoPhysicsDataset(Dataset):
             vfm_tokens = vjepa_npz['latents']
         else:
             vfm_tokens = vjepa_npz[vjepa_npz.files[0]]
-        vfm_tokens = torch.from_numpy(vfm_tokens).squeeze(0).float()
+        vfm_tokens = torch.from_numpy(vfm_tokens).squeeze(0).to(torch.float16)
 
-        text_tokens = torch.from_numpy(np.load(sample_info['text'])).squeeze(0).float()
+        text_tokens = torch.from_numpy(np.load(sample_info['text'])).squeeze(0).to(torch.float16)
         return z0, vfm_tokens, text_tokens
     
     def _verify_first_sample(self):
