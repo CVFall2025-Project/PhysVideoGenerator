@@ -166,7 +166,7 @@ class PhysicsCrossAttention(nn.Module):
             nn.Dropout(dropout)
         )
         
-        self.alpha = nn.Parameter(torch.tensor(0.02))
+        self.alpha = nn.Parameter(torch.tensor([0.02]))
         
     def forward(self, hidden_states: torch.Tensor, physics_context: torch.Tensor):
         B, N, D = hidden_states.shape
