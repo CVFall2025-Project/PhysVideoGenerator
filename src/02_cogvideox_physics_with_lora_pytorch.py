@@ -232,7 +232,7 @@ class PredictorP(nn.Module):
             nn.LayerNorm(config.PREDICTOR_HIDDEN_DIM) for _ in range(2)
         ])
         
-        self.vfm_queries = nn.Parameter(torch.randn(1, config.VFM_SEQ_LEN, config.HIDDEN_DIM) * 0.02)
+        self.vfm_queries = nn.Parameter(torch.randn(1, config.VFM_SEQ_LEN, config.PREDICTOR_HIDDEN_DIM) * 0.02)
         self.vfm_decoder = nn.ModuleList([
             nn.MultiheadAttention(config.PREDICTOR_HIDDEN_DIM, num_heads=8, batch_first=True)
             for _ in range(3)
@@ -281,11 +281,13 @@ class PredictorP(nn.Module):
         time_feat = self.time_proj(t_emb).unsqueeze(1)
         
         context = torch.cat([text_feat, time_feat], dim=1)
+        print(z_feat.shape, text_feat.shape, time_feat.shape, context.shape)
         for attn, norm in zip(self.fusion_attn, self.fusion_norms):
             attn_out, _ = attn(z_feat, context, context)
             z_feat = norm(z_feat + attn_out)
         
         vfm_tokens = self.vfm_queries.expand(B, -1, -1)
+        print(vfm_tokens.shape)
         for attn, norm, ffn in zip(self.vfm_decoder, self.vfm_norms, self.vfm_ffn):
             attn_out, _ = attn(vfm_tokens, z_feat, z_feat)
             vfm_tokens = norm(vfm_tokens + attn_out)
@@ -649,7 +651,7 @@ def train(config: Config):
             # Model dimensions
             "vfm_seq_len": config.VFM_SEQ_LEN,
             "vfm_dim": config.VFM_DIM,
-            "hidden_dim": config.HIDDEN_DIM,
+            "hidden_dim": config.PREDICTOR_HIDDEN_DIM,
             
             # Diffusion
             "t_steps": config.T_STEPS,
