@@ -59,7 +59,7 @@ class Config:
     LATENT_W = 90
     
     DIM_T = 256
-    PREDICTOR_HIDDEN_DIM = 1024 
+    PREDICTOR_HIDDEN_DIM = 512 
     
     # Model
     MODEL_NAME = "THUDM/CogVideoX-2b"
@@ -367,13 +367,19 @@ class CogVideoXWithPhysics(nn.Module):
 
         self.transformer.enable_gradient_checkpointing()
 
+        print(f"Gradient checkpointing enabled: {self.transformer.is_gradient_checkpointing}")
+
         # FREEZE ENTIRE COGVIDEOX - NO LORA, NO TRAINING
         print("Freezing entire CogVideoX transformer...")
         for param in self.transformer.parameters():
             param.requires_grad = False
         
         print("✓ CogVideoX frozen - 0 trainable params in base model")
-        
+
+        print("Debugging: ")
+        vdm_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Trainable: {vdm_trainable:,} (only physics attention)")
+
         print("Injecting physics cross-attention...")
         self.physics_attns = nn.ModuleList()
         
@@ -402,7 +408,7 @@ class CogVideoXWithPhysics(nn.Module):
                 self.physics_attns.append(physics_attn)
             else:
                 modified_block = original_block
-                
+
             new_blocks.append(modified_block)
             
         
@@ -733,7 +739,7 @@ def train(config: Config):
     
     dataset = VideoPhysicsDataset(config.DATASET_INDEX, config, cache_in_memory=False)
     dataloader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True, 
-                          num_workers=4, pin_memory=True)
+                          num_workers=0, pin_memory=False)
     
     # ========== WANDB: Log dataset info (ADDED) ==========
     wandb.config.update({
@@ -782,7 +788,9 @@ def train(config: Config):
             # ========== WANDB: Log gradient norm (ADDED) ==========
             grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, config.MAX_GRAD_NORM)
             
-            optimizer.step()
+            if (num_batches + 1) % 4 == 0:
+                optimizer.step()
+                optimizer.zero_grad()
             
             # Accumulate metrics
             epoch_loss += loss.item()
