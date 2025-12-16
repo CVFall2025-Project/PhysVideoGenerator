@@ -389,9 +389,20 @@ class CogVideoXWithPhysics(nn.Module):
                     num_heads=8
                 )
                 modified_block = CogVideoXBlockWithPhysics(original_block, physics_attn)
+                # CRITICAL: Freeze all original block parameters (keep only physics_attn trainable)
+                for param in modified_block.norm1.parameters():
+                    param.requires_grad = False
+                for param in modified_block.attn1.parameters():
+                    param.requires_grad = False
+                for param in modified_block.norm2.parameters():
+                    param.requires_grad = False
+                for param in modified_block.ff.parameters():
+                    param.requires_grad = False
+
                 self.physics_attns.append(physics_attn)
             else:
                 modified_block = original_block
+                
             new_blocks.append(modified_block)
             
         
