@@ -382,7 +382,7 @@ class CogVideoXWithPhysics(nn.Module):
         print(f"Trainable: {vdm_trainable:,} (only physics attention)")
 
         print("Injecting physics cross-attention...")
-        # self.physics_attns = nn.ModuleList()
+        self.physics_attns = nn.ModuleList()
         
         original_blocks = self.transformer.transformer_blocks
         new_blocks = nn.ModuleList()
@@ -406,15 +406,15 @@ class CogVideoXWithPhysics(nn.Module):
                 for param in modified_block.ff.parameters():
                     param.requires_grad = False
 
-                # self.physics_attns.append(physics_attn)
+                self.physics_attns.append(physics_attn)
             else:
                 modified_block = original_block
 
             new_blocks.append(modified_block)
             
         
-        # for physics_attn in self.physics_attns:
-        #     physics_attn.half()
+        for physics_attn in self.physics_attns:
+            physics_attn.half()
         
         self.transformer.transformer_blocks = new_blocks
         print(f"✓ Injected physics attention into {len(self.physics_attns)} blocks")
