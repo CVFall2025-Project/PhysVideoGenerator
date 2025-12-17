@@ -362,7 +362,8 @@ class CogVideoXWithPhysics(nn.Module):
         self.transformer = CogVideoXTransformer3DModel.from_pretrained(
             config.MODEL_NAME,
             subfolder="transformer",
-            torch_dtype=torch.float16
+            torch_dtype=torch.float16,
+            use_rotary_positional_embeddings = True
         )
 
         self.transformer.enable_gradient_checkpointing()
@@ -381,7 +382,7 @@ class CogVideoXWithPhysics(nn.Module):
         print(f"Trainable: {vdm_trainable:,} (only physics attention)")
 
         print("Injecting physics cross-attention...")
-        self.physics_attns = nn.ModuleList()
+        # self.physics_attns = nn.ModuleList()
         
         original_blocks = self.transformer.transformer_blocks
         new_blocks = nn.ModuleList()
@@ -392,7 +393,7 @@ class CogVideoXWithPhysics(nn.Module):
                 physics_attn = PhysicsCrossAttention(
                     query_dim=hidden_dim,
                     context_dim=config.VFM_DIM,
-                    num_heads=8
+                    num_heads=4
                 )
                 modified_block = CogVideoXBlockWithPhysics(original_block, physics_attn)
                 # CRITICAL: Freeze all original block parameters (keep only physics_attn trainable)
@@ -405,15 +406,15 @@ class CogVideoXWithPhysics(nn.Module):
                 for param in modified_block.ff.parameters():
                     param.requires_grad = False
 
-                self.physics_attns.append(physics_attn)
+                # self.physics_attns.append(physics_attn)
             else:
                 modified_block = original_block
 
             new_blocks.append(modified_block)
             
         
-        for physics_attn in self.physics_attns:
-            physics_attn.half()
+        # for physics_attn in self.physics_attns:
+        #     physics_attn.half()
         
         self.transformer.transformer_blocks = new_blocks
         print(f"✓ Injected physics attention into {len(self.physics_attns)} blocks")
