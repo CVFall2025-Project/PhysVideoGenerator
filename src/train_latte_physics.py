@@ -21,7 +21,7 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from diffusers import DDPMScheduler
 
-from src.latte_physics import LatteTransformer3DModelWithPhysics
+from latte_physics import LatteTransformer3DModelWithPhysics
 
 
 class PhysicsVideoDataset(Dataset):
@@ -48,6 +48,7 @@ class PhysicsVideoDataset(Dataset):
         else:
             vfm_tokens = vjepa_data[vjepa_data.files[0]]
         vjepa_tokens = torch.from_numpy(vfm_tokens).to(torch.float16)
+        vjepa_tokens = vjepa_tokens.squeeze(0).contiguous()
         
         # VAE latents [1, 16, 4, 32, 32]
         vae_data = np.load(entry['vae'])
@@ -58,9 +59,11 @@ class PhysicsVideoDataset(Dataset):
         else:
             z0 = vae_data[vae_data.files[0]]
         latents = torch.from_numpy(z0).to(torch.float16)  # [1, 16, 4, 32, 32]
+        latents = latents.permute(0, 2, 1, 3, 4).squeeze(0).contiguous() # [B, 4, 16, 32, 32]
         
         # Text embeddings [1, seq_len, 4096]
         text_embeddings = torch.from_numpy(np.load(entry['text'])).to(torch.float16)
+        text_embeddings = text_embeddings.squeeze(0).contiguous()
         
         return {
             'video_id': video_id,

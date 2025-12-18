@@ -333,15 +333,6 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
         Returns:
             Transformer2DModelOutput with predicted_vjepa if use_predictor=True
         """
-        # NOTE: Latte expects [B, C, T, H, W] internally, so we need to permute
-        # Input is [B, T, C, H, W], permute to [B, C, T, H, W]
-        if hidden_states.dim() == 5 and hidden_states.shape[2] == self.config.in_channels:
-            # Already in [B, C, T, H, W] format
-            pass
-        else:
-            # Need to permute from [B, T, C, H, W] to [B, C, T, H, W]
-            hidden_states = hidden_states.permute(0, 2, 1, 3, 4)
-        
         batch_size, channels, num_frame, height, width = hidden_states.shape
         
         # ========== STEP 1: Predict VJEPA tokens using PredictorP ==========
