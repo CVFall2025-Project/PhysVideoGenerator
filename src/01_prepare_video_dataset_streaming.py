@@ -149,10 +149,12 @@ def run_streaming_pipeline(
     for file_name in video_files:
         if cnt > limit:
             break
-        duration = csv_df[csv_df["video"]==file_name["seconds"]].values[0]
+        duration = csv_df[csv_df["video"]==file_name]["seconds"].values[0]
         if duration<=4.0:
             shortlisted_videos.append(file_name)
             cnt+=1
+    
+    print(f"Found suitable {len(shortlisted_videos)} videos")
 
     # Initialize encoders once
     if (do_vae and do_vjepa):

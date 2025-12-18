@@ -164,6 +164,7 @@ class VideoProcessor:
         # Pipeline A: VAE (256x256, 16 frames, [-1, 1])
         # ---------------------------------------------------------
         # Normalize to [-1, 1]
+        vae_video = video.clone().detach()
         vae_video = (vae_video / 127.5) - 1.0
 
         # Permute to [1, 3, 16, 256, 256] for VAE input
@@ -173,7 +174,8 @@ class VideoProcessor:
         # Pipeline B: VJEPA2 (256x256, 16 frames, ImageNet normalized)
         # ---------------------------------------------------------
         # Normalize to [0, 1] then apply ImageNet normalization
-        vjepa_video = vjepa_video / 255.0
+        vjepa_video = video.clone().detach()
+        vjepa_video = video / 255.0
 
         # Apply ImageNet normalization per-channel
         for c in range(3):
