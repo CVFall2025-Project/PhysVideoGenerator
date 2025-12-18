@@ -128,48 +128,57 @@ def run_streaming_pipeline(
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
-    
+
+    csv_path = os.path.join(paths["csv_data"], "OpenVid-1M.csv")
+    if not os.path.exists(csv_path):
+        logger.warning(f"CSV not found: {csv_path}. Skipping text encoding.")
+        return {}   
+    csv_df = pd.read_csv(csv_path)
+
+    # Process videos present in the `raw_videos` folder (downloader runs separately)
+    if not os.path.exists(paths["raw_videos"]):
+        logger.error(f"Raw videos directory not found: {paths['raw_videos']}. Place videos there or run downloader first.")
+        return {}
+
+    video_files = sorted([
+        f for f in os.listdir(paths["raw_videos"]) if f.lower().endswith((".mp4"))
+    ])
+
+    shortlisted_videos = []
+    cnt = 0
+    for file_name in video_files:
+        if cnt > limit:
+            break
+        duration = csv_df[csv_df["video"]==file_name["seconds"]].values[0]
+        if duration<=4.0:
+            shortlisted_videos.append(file_name)
+            cnt+=1
+
     # Initialize encoders once
     if (do_vae and do_vjepa):
 
-        vae_encoder = VAEEncoder("THUDM/CogVideoX-2b", torch_dtype=torch.float32, device=device)
-        vjepa_encoder = VJEPA2Encoder(model_name="facebook/vjepa2-vitg-fpc64-256", torch_dtype=torch.float32, device=device)
+        vae_encoder = VAEEncoder("maxin-cn/Latte-1", torch_dtype=torch.float16, device=device)
+        vjepa_encoder = VJEPA2Encoder(model_name="facebook/vjepa2-vitg-fpc64-256", torch_dtype=torch.float16, device=device)
         processor = clean_videos.VideoProcessor(device=device)
-        
-        processed_videos = []
-        
-        # Process videos present in the `raw_videos` folder (downloader runs separately)
-        if not os.path.exists(paths["raw_videos"]):
-            logger.error(f"Raw videos directory not found: {paths['raw_videos']}. Place videos there or run downloader first.")
-            return {"processed": processed_videos}
 
-        video_files = sorted([
-            f for f in os.listdir(paths["raw_videos"]) if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
-        ])
+        logger.info(f"Processing {len(shortlisted_videos)} videos from {paths['raw_videos']}")
 
-        if limit is not None:
-            video_files = video_files[:limit]
-
-        logger.info(f"Processing {len(video_files)} videos from {paths['raw_videos']}")
-
-        for video_file in tqdm(video_files, desc="Processing videos"):
+        for video_file in tqdm(shortlisted_videos, desc="Processing videos"):
             video_path = os.path.join(paths["raw_videos"], video_file)
-            base_name, success = process_video_full(
+            _, _ = process_video_full(
                 video_path,
                 vae_encoder,
                 vjepa_encoder,
                 processor,
                 paths,
             )
-            if success:
-                processed_videos.append(base_name)
 
         # Delete raw video immediately after processing
         delete_command = "rm -rf " + paths["raw_videos"] + "/*.mp4"
         os.system(delete_command)
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"Streaming encoding complete. Processed {len(processed_videos)} videos total.")
+        logger.info(f"Streaming encoding complete. Processed {len(shortlisted_videos)} videos total.")
         logger.info(f"{'='*60}")
     
     # Encode text captions if requested (do this after all video processing)
@@ -179,7 +188,7 @@ def run_streaming_pipeline(
     # Build index
     build_index(paths)
     
-    return {"processed": processed_videos}
+    return {"processed": shortlisted_videos}
 
 
 def run_text_encoding_batch(paths: Dict[str, str]) -> Dict[str, str]:

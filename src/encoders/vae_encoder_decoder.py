@@ -1,12 +1,12 @@
 import torch
 import imageio
-from diffusers import AutoencoderKLCogVideoX
+from diffusers import AutoencoderKL
 import numpy as np
 from typing import Optional
 
 class VAEEncoder():
     def __init__(self, model_name, torch_dtype, device: Optional[torch.device] = None):
-        self.model = AutoencoderKLCogVideoX.from_pretrained(model_name, subfolder="vae", torch_dtype=torch_dtype).to(device)
+        self.model = AutoencoderKL.from_pretrained(model_name, subfolder="vae", torch_dtype=torch_dtype).to(device)
         self.model.enable_slicing()
         self.model.enable_tiling()
         self.device = device
