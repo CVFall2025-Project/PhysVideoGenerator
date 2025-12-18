@@ -40,21 +40,33 @@ class PhysicsVideoDataset(Dataset):
         entry = self.data[video_id]
         
         # VJEPA tokens [1, 2048, 1408]
-        vjepa_data = np.load(entry['vjepa_path'])
-        vjepa_tokens = torch.from_numpy(vjepa_data['embedding']).float().squeeze(0)
+        vjepa_data = np.load(entry['vjepa'])
+        if 'arr_0' in vjepa_data:
+            vfm_tokens = vjepa_data['arr_0']
+        elif 'frames' in vjepa_data:
+            vfm_tokens = vjepa_data['latents']
+        else:
+            vfm_tokens = vjepa_data[vjepa_data.files[0]]
+        vjepa_tokens = torch.from_numpy(vfm_tokens).to(torch.float16)
         
         # VAE latents [1, 16, 4, 32, 32]
-        vae_data = np.load(entry['vae_path'])
-        latents = torch.from_numpy(vae_data['latent']).float().squeeze(0)  # [16, 4, 32, 32]
+        vae_data = np.load(entry['vae'])
+        if 'arr_0' in vae_data:
+            z0 = vae_data['arr_0']
+        elif 'frames' in vae_data:
+            z0 = vae_data['latents']
+        else:
+            z0 = vae_data[vae_data.files[0]]
+        latents = torch.from_numpy(z0).to(torch.float16)  # [1, 16, 4, 32, 32]
         
         # Text embeddings [1, seq_len, 4096]
-        text_embeddings = torch.from_numpy(np.load(entry['text_path'])).float().squeeze(0)
+        text_embeddings = torch.from_numpy(np.load(entry['text'])).to(torch.float16)
         
         return {
             'video_id': video_id,
-            'latents': latents,  # [16, 4, 32, 32]
-            'vjepa_tokens': vjepa_tokens,  # [2048, 1408]
-            'text_embeddings': text_embeddings,  # [seq_len, 4096]
+            'latents': latents,  # [1, 16, 4, 32, 32]
+            'vjepa_tokens': vjepa_tokens,  # [1, 2048, 1408]
+            'text_embeddings': text_embeddings,  # [1, seq_len, 4096]
         }
 
 
@@ -162,7 +174,7 @@ def train_with_predictor(
     
     # 3. Unfreeze temporal cross-attention (attn2 + norm2)
     print("✓ Training: Temporal cross-attention layers")
-    for i, temp_block in enumerate(model.temporal_transformer_blocks):
+    for _, temp_block in enumerate(model.temporal_transformer_blocks):
         if hasattr(temp_block, 'attn2'):
             for param in temp_block.attn2.parameters():
                 param.requires_grad = True
@@ -228,7 +240,7 @@ def train_with_predictor(
             disable=not accelerator.is_local_main_process,
         )
         
-        for step, batch in enumerate(progress_bar):
+        for _, batch in enumerate(progress_bar):
             with accelerator.accumulate(model):
                 latents = batch['latents']  # [B, 16, 4, 32, 32]
                 vjepa_gt = batch['vjepa_tokens']  # [B, 2048, 1408] - ground truth
