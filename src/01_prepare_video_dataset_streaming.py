@@ -97,7 +97,6 @@ def process_video_full(
         vjepa_path = os.path.join(output_paths["encoded_vjepa"], f"{base_name}_vjepa.npz")
         np.savez_compressed(vjepa_path, vjepa_arr)
         
-        logger.info(f"Encoded {base_name}: VAE→{vae_path}, VJEPA→{vjepa_path}")
         return base_name, True
     
     except Exception as e:
@@ -131,57 +130,59 @@ def run_streaming_pipeline(
     logger.info(f"Using device: {device}")
     
     # Initialize encoders once
-    vae_encoder = VAEEncoder("THUDM/CogVideoX-2b", torch_dtype=torch.float32, device=device) if do_vae else None
-    vjepa_encoder = VJEPA2Encoder(model_name="facebook/vjepa2-vitg-fpc64-256", torch_dtype=torch.float32, device=device) if do_vjepa else None
-    processor = clean_videos.VideoProcessor(device=device)
-    
-    processed_videos = []
-    
-    # Process videos present in the `raw_videos` folder (downloader runs separately)
-    if not os.path.exists(paths["raw_videos"]):
-        logger.error(f"Raw videos directory not found: {paths['raw_videos']}. Place videos there or run downloader first.")
-        return {"processed": processed_videos}
+    if (do_vae and do_vjepa):
 
-    video_files = sorted([
-        f for f in os.listdir(paths["raw_videos"]) if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
-    ])
+        vae_encoder = VAEEncoder("THUDM/CogVideoX-2b", torch_dtype=torch.float32, device=device)
+        vjepa_encoder = VJEPA2Encoder(model_name="facebook/vjepa2-vitg-fpc64-256", torch_dtype=torch.float32, device=device)
+        processor = clean_videos.VideoProcessor(device=device)
+        
+        processed_videos = []
+        
+        # Process videos present in the `raw_videos` folder (downloader runs separately)
+        if not os.path.exists(paths["raw_videos"]):
+            logger.error(f"Raw videos directory not found: {paths['raw_videos']}. Place videos there or run downloader first.")
+            return {"processed": processed_videos}
 
-    if limit is not None:
-        video_files = video_files[:limit]
+        video_files = sorted([
+            f for f in os.listdir(paths["raw_videos"]) if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
+        ])
 
-    logger.info(f"Processing {len(video_files)} videos from {paths['raw_videos']}")
+        if limit is not None:
+            video_files = video_files[:limit]
 
-    for video_file in tqdm(video_files, desc="Processing videos"):
-        video_path = os.path.join(paths["raw_videos"], video_file)
-        base_name, success = process_video_full(
-            video_path,
-            vae_encoder,
-            vjepa_encoder,
-            processor,
-            paths,
-        )
-        if success:
-            processed_videos.append(base_name)
+        logger.info(f"Processing {len(video_files)} videos from {paths['raw_videos']}")
 
-    # Delete raw video immediately after processing
-    delete_command = "rm -rf " + paths["raw_videos"] + "/*.mp4"
-    os.system(delete_command)
-    
-    logger.info(f"\n{'='*60}")
-    logger.info(f"Streaming encoding complete. Processed {len(processed_videos)} videos total.")
-    logger.info(f"{'='*60}")
+        for video_file in tqdm(video_files, desc="Processing videos"):
+            video_path = os.path.join(paths["raw_videos"], video_file)
+            base_name, success = process_video_full(
+                video_path,
+                vae_encoder,
+                vjepa_encoder,
+                processor,
+                paths,
+            )
+            if success:
+                processed_videos.append(base_name)
+
+        # Delete raw video immediately after processing
+        delete_command = "rm -rf " + paths["raw_videos"] + "/*.mp4"
+        os.system(delete_command)
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Streaming encoding complete. Processed {len(processed_videos)} videos total.")
+        logger.info(f"{'='*60}")
     
     # Encode text captions if requested (do this after all video processing)
     if do_text:
-        run_text_encoding_batch(paths, processed_videos)
+        run_text_encoding_batch(paths)
     
     # Build index
-    build_index(paths, processed_videos)
+    build_index(paths)
     
     return {"processed": processed_videos}
 
 
-def run_text_encoding_batch(paths: Dict[str, str], video_ids: list) -> Dict[str, str]:
+def run_text_encoding_batch(paths: Dict[str, str]) -> Dict[str, str]:
     """Encode text captions for processed videos."""
     logger.info("Starting text encoding step")
     csv_path = os.path.join(paths["csv_data"], "OpenVid-1M.csv")
@@ -191,7 +192,11 @@ def run_text_encoding_batch(paths: Dict[str, str], video_ids: list) -> Dict[str,
         return {}
     
     csv_df = pd.read_csv(csv_path)
-    model_name = "t5-v1_1-xxl"
+
+    encoded_video_path_list = os.listdir(paths["encoded_vae"])
+    video_ids = set([fname[:-8] for fname in encoded_video_path_list])
+
+    model_name = "google/t5-v1_1-xxl"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     text_encoder = TextEncoder(model_name=model_name, device=device)
     
@@ -217,10 +222,13 @@ def run_text_encoding_batch(paths: Dict[str, str], video_ids: list) -> Dict[str,
     return saved_map
 
 
-def build_index(paths: Dict[str, str], video_ids: list) -> None:
+def build_index(paths: Dict[str, str]) -> None:
     """Build index file for processed videos."""
     logger.info("Building indexed dataset")
     index_file = paths["index_file"]
+    
+    encoded_video_path_list = os.listdir(paths["encoded_vae"])
+    video_ids = set([fname[:-8] for fname in encoded_video_path_list])
     
     json_entries = []
     for video_id in sorted(video_ids):
@@ -232,9 +240,9 @@ def build_index(paths: Dict[str, str], video_ids: list) -> None:
         if not os.path.exists(vae_file):
             continue
         if not os.path.exists(vjepa_file):
-            vjepa_file = None
+            continue
         if not os.path.exists(text_file):
-            text_file = None
+            continue
         
         entry = {
             "video_id": video_id,
@@ -244,11 +252,14 @@ def build_index(paths: Dict[str, str], video_ids: list) -> None:
         }
         json_entries.append(entry)
     
-    with open(index_file, "r") as outf:
-        try:
-            existing_data = json.load(outf)
-        except json.JSONDecodeError:
-            existing_data = []
+    if not os.path.exists(index_file):
+        existing_data = []
+    else:
+        with open(index_file, "r") as outf:
+            try:
+                existing_data = json.load(outf)
+            except json.JSONDecodeError:
+                existing_data = []
     
     existing_data.extend(json_entries)
     

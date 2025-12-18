@@ -1,8 +1,10 @@
 """
 Physics-Informed Video Diffusion Model Training with CogVideoX
 Complete implementation with LoRA adapters and physics cross-attention
+NOW WITH WEIGHTS & BIASES INTEGRATION
 """
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,12 +16,22 @@ from typing import Optional
 import logging
 from pathlib import Path
 import json
+import wandb
+
+from accelerate import Accelerator
+from accelerate.utils import ProjectConfiguration, set_seed
+
+from functools import partial
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from accelerate import FullyShardedDataParallelPlugin
+from torch.distributed.fsdp import ShardingStrategy
+from torch.distributed.fsdp import CPUOffload
 
 # ============================================================================
 # CONFIG
 # ============================================================================
 class Config:
-    BATCH_SIZE = 2
+    BATCH_SIZE = 1
     T_STEPS = 1000
     LAMBDA_PRED = 0.1
     ALPHA_INIT = 0.02
@@ -35,8 +47,8 @@ class Config:
     RESUME_FROM_CHECKPOINT = None
     
     # LoRA Config
-    LORA_RANK = 64
-    LORA_ALPHA = 64
+    LORA_RANK = 32
+    LORA_ALPHA = 32
     LORA_DROPOUT = 0.0
     LORA_TARGET_MODULES = [
         "to_q", "to_k", "to_v", "to_out.0",
@@ -46,8 +58,8 @@ class Config:
     # Model dimensions
     VFM_SEQ_LEN = 6144
     VFM_DIM = 1408
-    TEXT_SEQ_LEN = 128
-    TEXT_DIM = 1024
+    TEXT_SEQ_LEN = 226
+    TEXT_DIM = 4096 #  t5-v1_1-xxl hidden size
     
     # VAE latent shape
     LATENT_C = 16
@@ -56,18 +68,29 @@ class Config:
     LATENT_W = 90
     
     DIM_T = 256
-    HIDDEN_DIM = 4096 #  t5-v1_1-xxl hidden size
+    HIDDEN_DIM = 4096
+    PREDICTOR_HIDDEN_DIM = 512 
     
     # Model
     MODEL_NAME = "THUDM/CogVideoX-2b"
     
     # Paths
-    CHECKPOINT_DIR = Path('./checkpoints')
-    LOG_DIR = Path('./logs')
-    DATASET_INDEX = 'path/to/your/index.json'  # UPDATE THIS
+    CHECKPOINT_DIR = Path('/scratch/sk12590/PhysVideoGenerator/checkpoints')
+    LOG_DIR = Path('/scratch/sk12590/PhysVideoGenerator/logs')
+
+    DATASET_INDEX = '/scratch/sk12590/PhysVideoGenerator/data/indexed_dataset.json'
     
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     USE_8BIT_ADAM = True
+    
+    # ========== WANDB CONFIG (ADDED) ==========
+    WANDB_PROJECT = "physics-video-diffusion"
+    WANDB_ENTITY = "sk12590"  # Set to your wandb username/team if needed
+    WANDB_RUN_NAME = "CV_PhysVideoGenerator"  # Auto-generated if None
+    WANDB_MODE = "offline"  # "online", "offline", or "disabled"
+    WANDB_LOG_INTERVAL = 10  # Log every N steps
+    WANDB_SAVE_CODE = False  # Save this script to wandb
+    WANDB_API_KEY = "61b31217f6c3fee5fd570133a1a777e3bf035c7c"
 
 # ============================================================================
 # CHECK DEPENDENCIES
@@ -110,16 +133,20 @@ def q_sample(z0: torch.Tensor, t: torch.Tensor, alpha_bar: torch.Tensor,
     
     alpha_bar_t = alpha_bar[t].view(-1, 1, 1, 1, 1)
     z_t = torch.sqrt(alpha_bar_t) * z0 + torch.sqrt(1 - alpha_bar_t) * noise
+
+    z_t = z_t.contiguous()
+    noise = noise.contiguous()
     return z_t, noise
 
 def sinusoidal_timestep_embedding(t: torch.Tensor, dim: int):
     half_dim = dim // 2
     emb = math.log(10000) / (half_dim - 1)
-    emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
-    emb = t.float()[:, None] * emb[None, :]
+    emb = torch.exp(torch.arange(half_dim, device=t.device, dtype=torch.float16) * -emb)
+    emb = t.half()[:, None] * emb[None, :]
     emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
     if dim % 2 == 1:
         emb = F.pad(emb, (0, 1))
+    emb = emb.half()
     return emb
 
 # ============================================================================
@@ -141,7 +168,7 @@ class PhysicsCrossAttention(nn.Module):
             nn.Dropout(dropout)
         )
         
-        self.alpha = nn.Parameter(torch.tensor(0.02))
+        self.alpha = nn.Parameter(torch.tensor([0.02]))
         
     def forward(self, hidden_states: torch.Tensor, physics_context: torch.Tensor):
         B, N, D = hidden_states.shape
@@ -180,48 +207,51 @@ class PredictorP(nn.Module):
         
         # Calculate positional embedding size dynamically based on config
         # After stride=2 convolution: T/2, H/2, W/2
-        pos_embed_seq_len = (config.LATENT_T // 2) * (config.LATENT_H // 2) * (config.LATENT_W // 2)
+        latent_t_out = (config.LATENT_T - 1) // 2 + 1
+        latent_h_out = (config.LATENT_H - 1) // 2 + 1
+        latent_w_out = (config.LATENT_W - 1) // 2 + 1
+        pos_embed_seq_len = latent_t_out * latent_h_out * latent_w_out
         self.latent_pos_embed = nn.Parameter(torch.randn(1, pos_embed_seq_len, latent_dim) * 0.02)
-        self.latent_to_hidden = nn.Linear(latent_dim, config.HIDDEN_DIM)
+        self.latent_to_hidden = nn.Linear(latent_dim, config.PREDICTOR_HIDDEN_DIM)
         
         self.text_proj = nn.Sequential(
-            nn.Linear(config.TEXT_DIM, config.HIDDEN_DIM),
-            nn.LayerNorm(config.HIDDEN_DIM),
+            nn.Linear(config.TEXT_DIM, config.PREDICTOR_HIDDEN_DIM),
+            nn.LayerNorm(config.PREDICTOR_HIDDEN_DIM),
             nn.GELU()
         )
         
         self.time_proj = nn.Sequential(
-            nn.Linear(config.DIM_T, config.HIDDEN_DIM),
-            nn.LayerNorm(config.HIDDEN_DIM),
+            nn.Linear(config.DIM_T, config.PREDICTOR_HIDDEN_DIM),
+            nn.LayerNorm(config.PREDICTOR_HIDDEN_DIM),
             nn.GELU()
         )
         
         self.fusion_attn = nn.ModuleList([
-            nn.MultiheadAttention(config.HIDDEN_DIM, num_heads=8, batch_first=True)
+            nn.MultiheadAttention(config.PREDICTOR_HIDDEN_DIM, num_heads=8, batch_first=True)
             for _ in range(2)
         ])
         self.fusion_norms = nn.ModuleList([
-            nn.LayerNorm(config.HIDDEN_DIM) for _ in range(2)
+            nn.LayerNorm(config.PREDICTOR_HIDDEN_DIM) for _ in range(2)
         ])
         
-        self.vfm_queries = nn.Parameter(torch.randn(1, config.VFM_SEQ_LEN, config.HIDDEN_DIM) * 0.02)
+        self.vfm_queries = nn.Parameter(torch.randn(1, config.VFM_SEQ_LEN, config.PREDICTOR_HIDDEN_DIM) * 0.02)
         self.vfm_decoder = nn.ModuleList([
-            nn.MultiheadAttention(config.HIDDEN_DIM, num_heads=8, batch_first=True)
+            nn.MultiheadAttention(config.PREDICTOR_HIDDEN_DIM, num_heads=8, batch_first=True)
             for _ in range(3)
         ])
         self.vfm_norms = nn.ModuleList([
-            nn.LayerNorm(config.HIDDEN_DIM) for _ in range(3)
+            nn.LayerNorm(config.PREDICTOR_HIDDEN_DIM) for _ in range(3)
         ])
         self.vfm_ffn = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(config.HIDDEN_DIM, config.HIDDEN_DIM * 4),
+                nn.Linear(config.PREDICTOR_HIDDEN_DIM, config.PREDICTOR_HIDDEN_DIM * 4),
                 nn.GELU(),
                 nn.Dropout(0.1),
-                nn.Linear(config.HIDDEN_DIM * 4, config.HIDDEN_DIM)
+                nn.Linear(config.PREDICTOR_HIDDEN_DIM * 4, config.PREDICTOR_HIDDEN_DIM)
             ) for _ in range(3)
         ])
         
-        self.vfm_out_proj = nn.Linear(config.HIDDEN_DIM, config.VFM_DIM)
+        self.vfm_out_proj = nn.Linear(config.PREDICTOR_HIDDEN_DIM, config.VFM_DIM)
         
     def forward(self, z_t: torch.Tensor, text_tokens: torch.Tensor, t_emb: torch.Tensor):
         """
@@ -332,9 +362,13 @@ class CogVideoXWithPhysics(nn.Module):
         self.transformer = CogVideoXTransformer3DModel.from_pretrained(
             config.MODEL_NAME,
             subfolder="transformer",
-            torch_dtype=torch.float32
+            torch_dtype=torch.float16
         )
-        
+
+        self.transformer.set_attn_processor(torch.nn.functional.scaled_dot_product_attention)
+
+        self.transformer.enable_gradient_checkpointing()
+
         print("Configuring LoRA adapters...")
         lora_config = LoraConfig(
             r=config.LORA_RANK,
@@ -356,16 +390,24 @@ class CogVideoXWithPhysics(nn.Module):
         original_blocks = self.transformer.transformer_blocks
         new_blocks = nn.ModuleList()
         
-        for original_block in original_blocks:
-            hidden_dim = original_block.attn1.to_q.in_features
-            physics_attn = PhysicsCrossAttention(
-                query_dim=hidden_dim,
-                context_dim=config.VFM_DIM,
-                num_heads=8
-            )
-            modified_block = CogVideoXBlockWithPhysics(original_block, physics_attn)
+        for i, original_block in enumerate(original_blocks):
+            if i % 5 == 0:
+                hidden_dim = original_block.attn1.to_q.in_features
+                physics_attn = PhysicsCrossAttention(
+                    query_dim=hidden_dim,
+                    context_dim=config.VFM_DIM,
+                    num_heads=8
+                )
+                modified_block = CogVideoXBlockWithPhysics(original_block, physics_attn)
+                self.physics_attns.append(physics_attn)
+            else:
+                modified_block = original_block
             new_blocks.append(modified_block)
-            self.physics_attns.append(physics_attn)
+            
+        self.transformer.to(torch.bfloat16)
+
+        for physics_attn in self.physics_attns:
+            physics_attn.to(torch.bfloat16)
         
         self.transformer.transformer_blocks = new_blocks
         print(f"✓ Injected physics attention into {len(self.physics_attns)} blocks")
@@ -399,7 +441,7 @@ class CogVideoXWithPhysics(nn.Module):
         
         # 2. Patch embedding
         # Note: CogVideoX expects [B, T, C, H, W] format for patch_embed
-        hidden_states_reordered = hidden_states.permute(0, 2, 1, 3, 4)  # [B, C, T, H, W] -> [B, T, C, H, W]
+        hidden_states_reordered = hidden_states.permute(0, 2, 1, 3, 4).contiguous()  # [B, C, T, H, W] -> [B, T, C, H, W]
         hidden_states_patched = self.transformer.patch_embed(encoder_hidden_states, hidden_states_reordered)
         hidden_states_patched = self.transformer.embedding_dropout(hidden_states_patched)
         
@@ -409,14 +451,23 @@ class CogVideoXWithPhysics(nn.Module):
         
         # 3. Transformer blocks with physics attention
         for block in self.transformer.transformer_blocks:
-            hidden_states_patched, encoder_hidden_states_patched = block(
-                hidden_states=hidden_states_patched,
-                encoder_hidden_states=encoder_hidden_states_patched,
-                temb=emb,
-                image_rotary_emb=image_rotary_emb,
-                attention_kwargs=None,
-                physics_context=predicted_vfm,
-            )
+            if isinstance(block, CogVideoXBlockWithPhysics):
+                hidden_states_patched, encoder_hidden_states_patched = block(
+                    hidden_states=hidden_states_patched,
+                    encoder_hidden_states=encoder_hidden_states_patched,
+                    temb=emb,
+                    image_rotary_emb=image_rotary_emb,
+                    attention_kwargs=None,
+                    physics_context=predicted_vfm,
+                )
+            else:
+                hidden_states_patched, encoder_hidden_states_patched = block(
+                    hidden_states=hidden_states_patched,
+                    encoder_hidden_states=encoder_hidden_states_patched,
+                    temb=emb,
+                    image_rotary_emb=image_rotary_emb,
+                    attention_kwargs=None,
+                )
         
         # 4. Final normalization
         if not self.transformer.config.use_rotary_positional_embeddings:
@@ -446,7 +497,7 @@ class CogVideoXWithPhysics(nn.Module):
             output = output.permute(0, 1, 5, 4, 2, 6, 3, 7).flatten(6, 7).flatten(4, 5).flatten(1, 2)
         
         # Convert back to [B, C, T, H, W] format
-        output = output.permute(0, 2, 1, 3, 4)  # [B, T, C, H, W] -> [B, C, T, H, W]
+        output = output.permute(0, 2, 1, 3, 4).contiguous()  # [B, T, C, H, W] -> [B, C, T, H, W]
         
         if not return_dict:
             return (output,)
@@ -480,9 +531,26 @@ class VideoPhysicsDataset(Dataset):
     
     def _load_sample(self, idx):
         sample_info = self.data_index[idx]
-        z0 = torch.from_numpy(np.load(sample_info['vae'])).float()
-        vfm_tokens = torch.from_numpy(np.load(sample_info['vjepa'])).float()
-        text_tokens = torch.from_numpy(np.load(sample_info['text'])).float()
+        
+        vae_npz = np.load(sample_info['vae'])
+        if 'arr_0' in vae_npz:
+            z0 = vae_npz['arr_0']
+        elif 'frames' in vae_npz:
+            z0 = vae_npz['latents']
+        else:
+            z0 = vae_npz[vae_npz.files[0]]
+        z0 = torch.from_numpy(z0).squeeze(0).to(torch.float16)
+
+        vjepa_npz = np.load(sample_info['vjepa'])
+        if 'arr_0' in vae_npz:
+            vfm_tokens = vjepa_npz['arr_0']
+        elif 'frames' in vae_npz:
+            vfm_tokens = vjepa_npz['latents']
+        else:
+            vfm_tokens = vjepa_npz[vjepa_npz.files[0]]
+        vfm_tokens = torch.from_numpy(vfm_tokens).squeeze(0).to(torch.float16)
+
+        text_tokens = torch.from_numpy(np.load(sample_info['text'])).squeeze(0).to(torch.float16)
         return z0, vfm_tokens, text_tokens
     
     def _verify_first_sample(self):
@@ -517,6 +585,11 @@ def save_checkpoint(vdm, predictor, optimizer, epoch, step, config):
     path = config.CHECKPOINT_DIR / f'checkpoint_epoch{epoch}_step{step}.pt'
     torch.save(checkpoint, path)
     logging.info(f"Saved checkpoint to {path}")
+    
+    # ========== WANDB: Save checkpoint (ADDED) ==========
+    if wandb.run is not None:
+        wandb.save(str(path))
+        wandb.save(str(lora_path / '*'))
 
 def load_checkpoint(vdm, predictor, optimizer, checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -548,65 +621,79 @@ def load_checkpoint(vdm, predictor, optimizer, checkpoint_path, device):
 # TRAINING
 # ============================================================================
 def train(config: Config):
-    config.LOG_DIR.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s',
-        handlers=[
-            logging.FileHandler(config.LOG_DIR / 'training.log'),
-            logging.StreamHandler()
-        ]
+    fsdp_plugin = FullyShardedDataParallelPlugin(
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        mixed_precision_policy=None, # Accelerate handles this from config
+        auto_wrap_policy=partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={CogVideoXBlockWithPhysics}, # <--- The Magic Fix
+        )
     )
-    
-    device = torch.device(config.DEVICE)
-    
-    betas, alphas, alpha_bar = make_beta_schedule(config.T_STEPS)
-    alpha_bar = alpha_bar.to(device)
-    
-    vdm = CogVideoXWithPhysics(config).to(device)
-    predictor = PredictorP(config).to(device)
-    
+
+    accelerator = Accelerator(
+        mixed_precision="bf16",
+        log_with="wandb",
+        project_dir=config.LOG_DIR,
+        fsdp_plugin=fsdp_plugin
+    )
+
+    if accelerator.is_main_process:
+        config.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        config.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(message)s',
+            handlers=[logging.FileHandler(config.LOG_DIR / 'training.log'), logging.StreamHandler()]
+        )
+
+        # Initialize trackers (replaces wandb.init)
+        accelerator.init_trackers(
+            project_name=config.WANDB_PROJECT,
+            config={k:str(v) for k,v in config.__dict__.items() if not k.startswith('__')}
+        )
+
+    # device = torch.device(config.DEVICE)
+
+    vdm = CogVideoXWithPhysics(config)
+    vdm = vdm.to(torch.bfloat16)
+
+    predictor = PredictorP(config)
+    predictor = predictor.to(torch.bfloat16)
+
     trainable_params = vdm.get_trainable_parameters() + list(predictor.parameters())
-    
-    if config.USE_8BIT_ADAM:
-        try:
-            import bitsandbytes as bnb
-            optimizer = bnb.optim.AdamW8bit(trainable_params, lr=config.ADAPTER_LR, 
-                                           weight_decay=config.WEIGHT_DECAY)
-        except ImportError:
-            optimizer = AdamW(trainable_params, lr=config.ADAPTER_LR, weight_decay=config.WEIGHT_DECAY)
-    else:
-        optimizer = AdamW(trainable_params, lr=config.ADAPTER_LR, weight_decay=config.WEIGHT_DECAY)
-    
-    start_epoch = 0
-    start_step = 0
-    if config.RESUME_FROM_CHECKPOINT:
-        start_epoch, start_step = load_checkpoint(vdm, predictor, optimizer, 
-                                                  config.RESUME_FROM_CHECKPOINT, device)
+
+    optimizer = AdamW(trainable_params, lr=config.ADAPTER_LR, weight_decay=config.WEIGHT_DECAY)
     
     dataset = VideoPhysicsDataset(config.DATASET_INDEX, config, cache_in_memory=False)
     dataloader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True, 
                           num_workers=4, pin_memory=True)
     
-    global_step = start_step
+    vdm, predictor, optimizer, dataloader = accelerator.prepare(
+        vdm, predictor, optimizer, dataloader
+    )
+
+    betas, alphas, alpha_bar = make_beta_schedule(config.T_STEPS)
+    alpha_bar = alpha_bar.to(accelerator.device)
+    
+    # global_step = start_step
+    global_step = 0
+    start_epoch = 0
     
     for epoch in range(start_epoch, config.EPOCHS):
         vdm.train()
         predictor.train()
         
-        for z0, vfm_tokens, text_tokens in dataloader:
-            z0 = z0.to(device)
-            vfm_tokens = vfm_tokens.to(device)
-            text_tokens = text_tokens.to(device)
-            
+        for batch in dataloader:
+            z0, vfm_tokens, text_tokens = batch
+
             B = z0.size(0)
-            t = torch.randint(0, config.T_STEPS, (B,), device=device)
-            
+            t = torch.randint(0, config.T_STEPS, (B,), device=accelerator.device)
             z_t, noise = q_sample(z0, t, alpha_bar)
-            
+
             t_emb = sinusoidal_timestep_embedding(t, config.DIM_T)
+
+            # Forward passes
             predicted_vfm = predictor(z_t, text_tokens, t_emb)
-            
             eps_hat = vdm(
                 hidden_states=z_t,
                 encoder_hidden_states=text_tokens,
@@ -618,25 +705,46 @@ def train(config: Config):
             L_pred = F.mse_loss(predicted_vfm, vfm_tokens)
             loss = L_diff + config.LAMBDA_PRED * L_pred
             
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable_params, config.MAX_GRAD_NORM)
+            # ### CHANGED: Backprop using accelerator
+            accelerator.backward(loss)
+            
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_norm_(trainable_params, config.MAX_GRAD_NORM)
+            
             optimizer.step()
+            optimizer.zero_grad()
             
-            if global_step % config.LOG_EVERY == 0:
-                logging.info(
-                    f"Epoch {epoch} Step {global_step} Loss: {loss.item():.4f} "
-                    f"L_diff: {L_diff.item():.4f} L_pred: {L_pred.item():.4f}"
-                )
+            # Logging (only on main process)
+            if accelerator.is_main_process and global_step % config.WANDB_LOG_INTERVAL == 0:
+                accelerator.log({
+                    "train/loss": loss.item(),
+                    "train/l_diff": L_diff.item(),
+                    "train/l_pred": L_pred.item(),
+                }, step=global_step)
+                
+                logging.info(f"Step {global_step} Loss: {loss.item():.4f}")
             
+            # ### CHANGED: Saving Checkpoints with FSDP
             if global_step % config.SAVE_EVERY == 0 and global_step > 0:
-                save_checkpoint(vdm, predictor, optimizer, epoch, global_step, config)
+                accelerator.wait_for_everyone()
+                # Unwrap models to save clean state dicts
+                unwrapped_vdm = accelerator.unwrap_model(vdm)
+                unwrapped_predictor = accelerator.unwrap_model(predictor)
+                
+                if accelerator.is_main_process:
+                    save_path = config.CHECKPOINT_DIR / f'checkpoint_{global_step}.pt'
+                    torch.save({
+                        'vdm': unwrapped_vdm.state_dict(),
+                        'predictor': unwrapped_predictor.state_dict(),
+                    }, save_path)
+                    logging.info(f"Saved to {save_path}")
             
             global_step += 1
-        
-        save_checkpoint(vdm, predictor, optimizer, epoch, global_step, config)
     
     logging.info("Training complete!")
+    
+    # ========== WANDB: Finish (ADDED) ==========
+    # wandb.finish()
 
 if __name__ == '__main__':
     config = Config()

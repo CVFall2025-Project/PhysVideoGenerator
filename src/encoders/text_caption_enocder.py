@@ -23,7 +23,7 @@ class TextEncoder():
         self.model = T5EncoderModel.from_pretrained(model_name).to(self.device)
         self.model.eval()
 
-    def encode(self, caption: str, max_length: int = 128) -> torch.Tensor:
+    def encode(self, caption: str, max_length: int = 226) -> torch.Tensor:
         """Encode a caption to token-level embeddings.
 
         Args:

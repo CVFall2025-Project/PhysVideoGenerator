@@ -6,7 +6,6 @@ a specified number of videos from each group, deleting the rest.
 """
 
 import os
-import re
 from pathlib import Path
 from collections import defaultdict
 import argparse
