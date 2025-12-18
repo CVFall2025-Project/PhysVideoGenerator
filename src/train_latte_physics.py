@@ -21,7 +21,7 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from diffusers import DDPMScheduler
 
-from latte_physics import LatteTransformer3DModelWithPhysics
+from src.latte_physics import LatteTransformer3DModelWithPhysics
 
 
 class PhysicsVideoDataset(Dataset):
@@ -30,14 +30,14 @@ class PhysicsVideoDataset(Dataset):
     def __init__(self, index_json_path):
         with open(index_json_path, 'r') as f:
             self.data = json.load(f)
-        self.video_ids = list(self.data.keys())
+        self.video_ids = [data_dict["video_id"] for data_dict in self.data]
         
     def __len__(self):
         return len(self.video_ids)
     
     def __getitem__(self, idx):
         video_id = self.video_ids[idx]
-        entry = self.data[video_id]
+        entry = self.data[idx]
         
         # VJEPA tokens [1, 2048, 1408]
         vjepa_data = np.load(entry['vjepa'])
@@ -66,7 +66,7 @@ class PhysicsVideoDataset(Dataset):
             'video_id': video_id,
             'latents': latents,  # [1, 16, 4, 32, 32]
             'vjepa_tokens': vjepa_tokens,  # [1, 2048, 1408]
-            'text_embeddings': text_embeddings,  # [1, seq_len, 4096]
+            'text_embeddings': text_embeddings,  # [1, 226, 4096]
         }
 
 
@@ -136,7 +136,7 @@ def train_with_predictor(
         pretrained = LatteTransformer3DModel.from_pretrained(
             "maxin-cn/Latte-1",
             subfolder="transformer",
-            torch_dtype=torch.float32,
+            torch_dtype=torch.float16,
         )
         
         model_state = model.state_dict()
@@ -267,10 +267,10 @@ def train_with_predictor(
                 )
                 
                 # Loss 1: Noise prediction (main diffusion loss)
-                noise_loss = F.mse_loss(model_output.sample.float(), noise.float(), reduction="mean")
+                noise_loss = F.mse_loss(model_output.sample.to(torch.float16), noise.to(torch.float16), reduction="mean")
                 
                 # Loss 2: VJEPA prediction (PredictorP supervised by ground truth)
-                vjepa_loss = F.mse_loss(predicted_vjepa.float(), vjepa_gt.float(), reduction="mean")
+                vjepa_loss = F.mse_loss(predicted_vjepa.to(torch.float16), vjepa_gt.to(torch.float16), reduction="mean")
                 
                 # Combined loss
                 total_loss = noise_loss + vjepa_loss_weight * vjepa_loss
