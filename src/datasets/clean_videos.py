@@ -167,8 +167,8 @@ class VideoProcessor:
         vae_video = video.clone().detach()
         vae_video = (vae_video / 127.5) - 1.0
 
-        # Permute to [1, 3, 16, 256, 256] for VAE input
-        vae_video = vae_video.permute(1, 0, 2, 3).unsqueeze(0)
+        # Permute to [1, 16, 3 , 256, 256] for VAE input
+        vae_video = vae_video.unsqueeze(0)
 
         # ---------------------------------------------------------
         # Pipeline B: VJEPA2 (256x256, 16 frames, ImageNet normalized)
@@ -183,7 +183,7 @@ class VideoProcessor:
 
         # Move outputs back to CPU and convert to numpy for saving (keeps API unchanged)
         return {
-            "vae": vae_video.cpu().numpy().astype(np.float16), # [1, 3, 16, 256, 256]
+            "vae": vae_video.cpu().numpy().astype(np.float16), # [1, 16, 3, 256, 256]
             "vjepa": vjepa_video.cpu().numpy().astype(np.float16), # [16, 3, 256, 256]
         }
 

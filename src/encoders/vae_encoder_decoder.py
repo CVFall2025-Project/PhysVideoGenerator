@@ -3,6 +3,7 @@ import imageio
 from diffusers import AutoencoderKL
 import numpy as np
 from typing import Optional
+from einops import rearrange
 
 class VAEEncoder():
     def __init__(self, model_name, torch_dtype, device: Optional[torch.device] = None):
@@ -12,20 +13,13 @@ class VAEEncoder():
         self.device = device
         self.torch_dtype = torch_dtype
     
-    def encode(self, video):
-        if 'frames' in video.files:
-            frames_array = video['frames']
-        else:
-            # Use the first available array if 'frames' key doesn't exist
-            frames_array = video[video.files[0]]
-        
-        # Convert frames to tensors
-        video_tensor = torch.from_numpy(frames_array).to(self.device).to(self.torch_dtype) # (1, C, T, H, W)
-        video.close()
-
+    def encode(self, video_tensor):
         # Encode using the VAE model
         with torch.no_grad():
-            encoded_frames = self.model.encode(video_tensor)[0].sample()
+            b, _, _, _, _ = video_tensor.shape
+            video_tensor = rearrange(video_tensor, 'b f c h w -> (b f) c h w').contiguous()
+            encoded_frames = self.model.encode(video_tensor).latent_dist.sample().mul_(0.18215)
+            encoded_frames = rearrange(encoded_frames, '(b f) c h w -> b f c h w', b=b).contiguous()
         
         return encoded_frames
     

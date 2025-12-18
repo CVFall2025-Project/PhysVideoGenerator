@@ -80,8 +80,7 @@ def process_video_full(
         # VAE encode
         frames_vae = outputs["vae"]
         vae_tensor = torch.from_numpy(frames_vae).to(vae_encoder.device).to(vae_encoder.torch_dtype)
-        with torch.no_grad():
-            vae_encoded = vae_encoder.model.encode(vae_tensor)[0].sample()
+        vae_encoded = vae_encoder.model.encode(vae_tensor)
         vae_arr = vae_encoded.detach().cpu().numpy()
         vae_path = os.path.join(output_paths["encoded_vae"], f"{base_name}_vae.npz")
         np.savez_compressed(vae_path, vae_arr)
