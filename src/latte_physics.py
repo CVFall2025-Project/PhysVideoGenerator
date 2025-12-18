@@ -48,7 +48,7 @@ class PredictorP(nn.Module):
         self.vjepa_dim = vjepa_dim
         
         # 1. Latent encoder (process noisy video latents)
-        # Input shape: [B, T, C, H, W] - need to permute to [B, C, T, H, W] for Conv3d
+        # Input shape: [B, C, T, H, W]
         self.latent_encoder = nn.Sequential(
             nn.Conv3d(latent_channels, hidden_dim // 2, kernel_size=3, padding=1),
             nn.GroupNorm(8, hidden_dim // 2),
@@ -114,7 +114,7 @@ class PredictorP(nn.Module):
     
     def forward(
         self,
-        noisy_latents: torch.Tensor,  # [B, 16, 4, 32, 32]
+        noisy_latents: torch.Tensor,  # [B, 4, 16, 32, 32]
         text_embeddings: torch.Tensor,  # [B, seq_len, 4096]
         timesteps: torch.Tensor,  # [B]
     ):
@@ -122,7 +122,7 @@ class PredictorP(nn.Module):
         Predict VJEPA tokens from noisy latents, text, and timestep.
         
         Args:
-            noisy_latents: [B, T=16, C=4, H=32, W=32]
+            noisy_latents: [B, C=4, T=16, H=32, W=32]
             text_embeddings: [B, seq_len, 4096]
             timesteps: [B]
         
@@ -132,8 +132,6 @@ class PredictorP(nn.Module):
         batch_size = noisy_latents.shape[0]
         
         # 1. Encode noisy latents
-        # Permute from [B, T, C, H, W] to [B, C, T, H, W] for Conv3d
-        noisy_latents = noisy_latents.permute(0, 2, 1, 3, 4)  # [B, 4, 16, 32, 32]
         latent_features = self.latent_encoder(noisy_latents)  # [B, hidden_dim, 8, 16, 16]
         
         # Flatten spatial-temporal: [B, hidden_dim, 8, 16, 16] -> [B, 8*16*16, hidden_dim]
