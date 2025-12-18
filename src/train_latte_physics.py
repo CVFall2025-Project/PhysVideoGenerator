@@ -20,9 +20,12 @@ from pathlib import Path
 from tqdm import tqdm
 from accelerate import Accelerator
 from diffusers import DDPMScheduler
+import gc
 
 from latte_physics import LatteTransformer3DModelWithPhysics
 
+gc.collect()
+torch.cuda.empty_cache()
 
 class PhysicsVideoDataset(Dataset):
     """Dataset with VJEPA, VAE latents, and text embeddings."""
@@ -47,7 +50,7 @@ class PhysicsVideoDataset(Dataset):
             vfm_tokens = vjepa_data['latents']
         else:
             vfm_tokens = vjepa_data[vjepa_data.files[0]]
-        vjepa_tokens = torch.from_numpy(vfm_tokens).to(torch.float16)
+        vjepa_tokens = torch.from_numpy(vfm_tokens).to(torch.bfloat16)
         vjepa_tokens = vjepa_tokens.squeeze(0).contiguous()
         
         # VAE latents [1, 16, 4, 32, 32]
@@ -58,11 +61,11 @@ class PhysicsVideoDataset(Dataset):
             z0 = vae_data['latents']
         else:
             z0 = vae_data[vae_data.files[0]]
-        latents = torch.from_numpy(z0).to(torch.float16)  # [1, 16, 4, 32, 32]
+        latents = torch.from_numpy(z0).to(torch.bfloat16)  # [1, 16, 4, 32, 32]
         latents = latents.permute(0, 2, 1, 3, 4).squeeze(0).contiguous() # [B, 4, 16, 32, 32]
         
         # Text embeddings [1, seq_len, 4096]
-        text_embeddings = torch.from_numpy(np.load(entry['text'])).to(torch.float16)
+        text_embeddings = torch.from_numpy(np.load(entry['text'])).to(torch.bfloat16)
         text_embeddings = text_embeddings.squeeze(0).contiguous()
         
         return {
@@ -80,7 +83,7 @@ def train_with_predictor(
     batch_size: int = 1,
     learning_rate: float = 1e-5,
     vjepa_loss_weight: float = 1.0,  # Weight for VJEPA prediction loss
-    mixed_precision: str = "fp16",
+    mixed_precision: str = "bf16",
     num_train_samples: int = None,
 ):
     """
@@ -109,7 +112,7 @@ def train_with_predictor(
     print("\nInitializing Latte + PredictorP...")
     model = LatteTransformer3DModelWithPhysics(
         num_attention_heads=16,
-        attention_head_dim=88,
+        attention_head_dim=72,
         in_channels=4,
         out_channels=4,
         num_layers=28,
@@ -139,7 +142,7 @@ def train_with_predictor(
         pretrained = LatteTransformer3DModel.from_pretrained(
             "maxin-cn/Latte-1",
             subfolder="transformer",
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
         )
         
         model_state = model.state_dict()
@@ -151,6 +154,11 @@ def train_with_predictor(
         
         model.load_state_dict(model_state, strict=False)
         print("✓ Loaded pretrained Latte base")
+
+        del pretrained
+        gc.collect()
+        torch.cuda.empty_cache()
+
     except Exception as e:
         print(f"Could not load pretrained: {e}")
     
@@ -177,13 +185,24 @@ def train_with_predictor(
     
     # 3. Unfreeze temporal cross-attention (attn2 + norm2)
     print("✓ Training: Temporal cross-attention layers")
-    for _, temp_block in enumerate(model.temporal_transformer_blocks):
-        if hasattr(temp_block, 'attn2'):
-            for param in temp_block.attn2.parameters():
-                param.requires_grad = True
-        if hasattr(temp_block, 'norm2'):
-            for param in temp_block.norm2.parameters():
-                param.requires_grad = True
+    num_blocks = len(model.temporal_transformer_blocks)
+    blocks_to_train = 8
+
+    for i, temp_block in enumerate(model.temporal_transformer_blocks):
+        if i >= (num_blocks - blocks_to_train):
+            if hasattr(temp_block, 'attn2'):
+                for param in temp_block.attn2.parameters():
+                    param.requires_grad = True
+            if hasattr(temp_block, 'norm2'):
+                for param in temp_block.norm2.parameters():
+                    param.requires_grad = True
+        else:
+            if hasattr(temp_block, 'attn2'):
+                for param in temp_block.attn2.parameters():
+                    param.requires_grad = False
+            if hasattr(temp_block, 'norm2'):
+                for param in temp_block.norm2.parameters():
+                    param.requires_grad = False
     
     # Print trainable parameter breakdown
     predictor_params = sum(p.numel() for p in model.predictor.parameters() if p.requires_grad) if model.predictor else 0
@@ -270,10 +289,10 @@ def train_with_predictor(
                 )
                 
                 # Loss 1: Noise prediction (main diffusion loss)
-                noise_loss = F.mse_loss(model_output.sample.to(torch.float16), noise.to(torch.float16), reduction="mean")
+                noise_loss = F.mse_loss(model_output.sample.to(torch.bfloat16), noise.to(torch.bfloat16), reduction="mean")
                 
                 # Loss 2: VJEPA prediction (PredictorP supervised by ground truth)
-                vjepa_loss = F.mse_loss(predicted_vjepa.to(torch.float16), vjepa_gt.to(torch.float16), reduction="mean")
+                vjepa_loss = F.mse_loss(predicted_vjepa.to(torch.bfloat16), vjepa_gt.to(torch.bfloat16), reduction="mean")
                 
                 # Combined loss
                 total_loss = noise_loss + vjepa_loss_weight * vjepa_loss
@@ -345,7 +364,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--vjepa_weight", type=float, default=1.0, help="VJEPA loss weight")
     parser.add_argument("--num_samples", type=int, default=None)
-    parser.add_argument("--mixed_precision", type=str, default="fp16")
+    parser.add_argument("--mixed_precision", type=str, default="bf16")
     
     args = parser.parse_args()
     

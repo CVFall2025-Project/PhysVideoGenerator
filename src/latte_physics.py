@@ -12,6 +12,7 @@ Architecture:
 from typing import Optional
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.attention import BasicTransformerBlock
@@ -305,7 +306,7 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
         temp_pos_embed = get_1d_sincos_pos_embed_from_grid(
             inner_dim, torch.arange(0, video_length).unsqueeze(1), output_type="pt"
         )
-        self.register_buffer("temp_pos_embed", temp_pos_embed.float().unsqueeze(0), persistent=False)
+        self.register_buffer("temp_pos_embed", temp_pos_embed.to(torch.bfloat16).unsqueeze(0), persistent=False)
         
         self.gradient_checkpointing = True
 
@@ -378,9 +379,10 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
         physics_embeddings_temporal = None
         if physics_tokens is not None and self.vjepa_projection is not None:
             physics_projected = self.vjepa_projection(physics_tokens)  # [B, 2048, inner_dim]
-            physics_embeddings_temporal = physics_projected.repeat_interleave(
-                num_patches, dim=0
-            ).view(-1, physics_projected.shape[-2], physics_projected.shape[-1])
+            # physics_embeddings_temporal = physics_projected.repeat_interleave(
+            #     num_patches, dim=0
+            # ).view(-1, physics_projected.shape[-2], physics_projected.shape[-1])
+            physics_embeddings_temporal = physics_projected
 
         # Prepare timesteps
         timestep_spatial = timestep.repeat_interleave(num_frame, dim=0).view(-1, timestep.shape[-1])
@@ -391,15 +393,27 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
             zip(self.transformer_blocks, self.temporal_transformer_blocks)
         ):
             # Spatial block (text conditioning)
-            hidden_states = spatial_block(
-                hidden_states,
-                None,
-                encoder_hidden_states_spatial,
-                encoder_attention_mask,
-                timestep_spatial,
-                None,
-                None,
-            )
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(
+                    spatial_block,
+                    hidden_states,
+                    None,  # attention_mask
+                    encoder_hidden_states_spatial,
+                    encoder_attention_mask,
+                    timestep_spatial,
+                    None,  # cross_attention_kwargs
+                    None,  # class_labels
+                )
+            else:
+                hidden_states = spatial_block(
+                    hidden_states,
+                    None,
+                    encoder_hidden_states_spatial,
+                    encoder_attention_mask,
+                    timestep_spatial,
+                    None,
+                    None,
+                )
 
             if enable_temporal_attentions:
                 # Reshape for temporal: (B*T, H*W, C) -> (B*H*W, T, C)
@@ -413,15 +427,27 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
                     hidden_states = hidden_states + self.temp_pos_embed.to(hidden_states.dtype)
 
                 # Temporal block (VJEPA physics conditioning!)
-                hidden_states = temp_block(
-                    hidden_states,
-                    None,
-                    physics_embeddings_temporal,  # ← VJEPA physics!
-                    None,
-                    timestep_temp,
-                    None,
-                    None,
-                )
+                if torch.is_grad_enabled() and self.gradient_checkpointing:
+                    hidden_states = self._gradient_checkpointing_func(
+                        temp_block,
+                        hidden_states,
+                        None,  # attention_mask
+                        physics_embeddings_temporal,  # ← VJEPA physics!
+                        None,  # encoder_attention_mask
+                        timestep_temp,
+                        None,  # cross_attention_kwargs
+                        None,  # class_labels
+                    )
+                else:
+                    hidden_states = temp_block(
+                        hidden_states,
+                        None,
+                        physics_embeddings_temporal,  # ← VJEPA physics!
+                        None,
+                        timestep_temp,
+                        None,
+                        None,
+                    )
 
                 # Reshape back: (B*H*W, T, C) -> (B*T, H*W, C)
                 hidden_states = hidden_states.reshape(
