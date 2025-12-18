@@ -80,7 +80,7 @@ def process_video_full(
         # VAE encode
         frames_vae = outputs["vae"]
         vae_tensor = torch.from_numpy(frames_vae).to(vae_encoder.device).to(vae_encoder.torch_dtype)
-        vae_encoded = vae_encoder.model.encode(vae_tensor)
+        vae_encoded = vae_encoder.encode(vae_tensor)
         vae_arr = vae_encoded.detach().cpu().numpy()
         vae_path = os.path.join(output_paths["encoded_vae"], f"{base_name}_vae.npz")
         np.savez_compressed(vae_path, vae_arr)
@@ -88,10 +88,7 @@ def process_video_full(
         # VJEPA encode (create minimal NpzFile wrapper for VJEPA encoder)
         frames_vjepa = outputs["vjepa"]
         vjepa_tensor = torch.from_numpy(frames_vjepa).to(vjepa_encoder.device).to(vjepa_encoder.torch_dtype)
-        with torch.inference_mode():
-            # Mimic VJEPA2Encoder.encode() logic but inline
-            x_hf = vjepa_encoder.transform(vjepa_tensor, return_tensors="pt")["pixel_values_videos"].to(vjepa_encoder.device)
-            vjepa_features = vjepa_encoder.model.get_vision_features(x_hf)
+        vjepa_features = vjepa_encoder.encode(vjepa_tensor)
         vjepa_arr = vjepa_features.detach().cpu().numpy()
         vjepa_path = os.path.join(output_paths["encoded_vjepa"], f"{base_name}_vjepa.npz")
         np.savez_compressed(vjepa_path, vjepa_arr)
