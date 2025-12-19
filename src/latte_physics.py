@@ -382,7 +382,11 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
             # physics_embeddings_temporal = physics_projected.repeat_interleave(
             #     num_patches, dim=0
             # ).view(-1, physics_projected.shape[-2], physics_projected.shape[-1])
-            physics_embeddings_temporal = physics_projected
+            physics_embeddings_temporal = physics_projected.unsqueeze(1).expand(
+                -1, num_patches, -1, -1
+                ).reshape(batch_size * num_patches, -1, physics_projected.shape[-1])
+            # physics_embeddings_temporal = physics_projected
+
 
         # Prepare timesteps
         timestep_spatial = timestep.repeat_interleave(num_frame, dim=0).view(-1, timestep.shape[-1])
@@ -394,15 +398,10 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
         ):
             # Spatial block (text conditioning)
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-                hidden_states = self._gradient_checkpointing_func(
-                    spatial_block,
-                    hidden_states,
-                    None,  # attention_mask
-                    encoder_hidden_states_spatial,
-                    encoder_attention_mask,
-                    timestep_spatial,
-                    None,  # cross_attention_kwargs
-                    None,  # class_labels
+                hidden_states = checkpoint(
+                    spatial_block, hidden_states, None, encoder_hidden_states_spatial, 
+                    encoder_attention_mask, timestep_spatial, None, None, 
+                    use_reentrant=False
                 )
             else:
                 hidden_states = spatial_block(
@@ -428,15 +427,10 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
 
                 # Temporal block (VJEPA physics conditioning!)
                 if torch.is_grad_enabled() and self.gradient_checkpointing:
-                    hidden_states = self._gradient_checkpointing_func(
-                        temp_block,
-                        hidden_states,
-                        None,  # attention_mask
-                        physics_embeddings_temporal,  # ← VJEPA physics!
-                        None,  # encoder_attention_mask
-                        timestep_temp,
-                        None,  # cross_attention_kwargs
-                        None,  # class_labels
+                    hidden_states = checkpoint(
+                        temp_block, hidden_states, None, physics_embeddings_temporal, 
+                        None, timestep_temp, None, None, 
+                        use_reentrant=False
                     )
                 else:
                     hidden_states = temp_block(

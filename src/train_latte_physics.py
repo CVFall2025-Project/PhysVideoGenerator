@@ -156,6 +156,9 @@ def train_with_predictor(
         print("✓ Loaded pretrained Latte base")
 
         del pretrained
+        del model_state
+        del pretrained_state
+        
         gc.collect()
         torch.cuda.empty_cache()
 
