@@ -1,3 +1,16 @@
+Warning: Permanently added 'greene.hpc.nyu.edu' (ED25519) to the list of known hosts.
+ _   ___   ___   _   _   _ ____   ____ 
+| \ | \ \ / / | | | | | | |  _ \ / ___|
+|  \| |\ V /| | | | | |_| | |_) | |    
+| |\  | | | | |_| | |  _  |  __/| |___ 
+|_| \_| |_|  \___/  |_| |_|_|    \____|
+ 
+
+  ____                          
+ / ___|_ __ ___  ___ _ __   ___ 
+| |  _| '__/ _ \/ _ \ '_ \ / _ \
+| |_| | | |  __/  __/ | | |  __/
+ \____|_|  \___|\___|_| |_|\___|
 """
 Physics-Informed Video Diffusion Model Training with CogVideoX
 Complete implementation with LoRA adapters and physics cross-attention
@@ -45,6 +58,11 @@ class Config:
         "to_q", "to_k", "to_v", "to_out.0",
         "ff.net.0.proj", "ff.net.2"
     ]
+    
+    # ========== ABLATION EXPERIMENT SWITCHES ==========
+    USE_PREDICTOR = True  # Enable/disable Predictor P module
+    USE_LORA = True  # Enable/disable LoRA adapters
+    USE_PHYSICS_ATTENTION = True  # Enable/disable Physics Cross-Attention
     
     # Model dimensions
     VFM_SEQ_LEN = 6144
@@ -362,40 +380,52 @@ class CogVideoXWithPhysics(nn.Module):
             torch_dtype=torch.float32
         )
         
-        print("Configuring LoRA adapters...")
-        lora_config = LoraConfig(
-            r=config.LORA_RANK,
-            lora_alpha=config.LORA_ALPHA,
-            init_lora_weights="gaussian",
-            target_modules=config.LORA_TARGET_MODULES,
-            lora_dropout=config.LORA_DROPOUT,
-        )
-        
-        self.transformer = get_peft_model(self.transformer, lora_config)
-        
-        trainable_params = sum(p.numel() for p in self.transformer.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in self.transformer.parameters())
-        print(f"trainable params: {trainable_params:,} || all params: {total_params:,} || trainable%: {100 * trainable_params / total_params:.2f}")
-        
-        print("Injecting physics cross-attention...")
-        self.physics_attns = nn.ModuleList()
-        
-        original_blocks = self.transformer.transformer_blocks
-        new_blocks = nn.ModuleList()
-        
-        for original_block in original_blocks:
-            hidden_dim = original_block.attn1.to_q.in_features
-            physics_attn = PhysicsCrossAttention(
-                query_dim=hidden_dim,
-                context_dim=config.VFM_DIM,
-                num_heads=8
+        # Conditionally apply LoRA adapters
+        if config.USE_LORA:
+            print("Configuring LoRA adapters...")
+            lora_config = LoraConfig(
+                r=config.LORA_RANK,
+                lora_alpha=config.LORA_ALPHA,
+                init_lora_weights="gaussian",
+                target_modules=config.LORA_TARGET_MODULES,
+                lora_dropout=config.LORA_DROPOUT,
             )
-            modified_block = CogVideoXBlockWithPhysics(original_block, physics_attn)
-            new_blocks.append(modified_block)
-            self.physics_attns.append(physics_attn)
+            
+            self.transformer = get_peft_model(self.transformer, lora_config)
+            
+            trainable_params = sum(p.numel() for p in self.transformer.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in self.transformer.parameters())
+            print(f"trainable params: {trainable_params:,} || all params: {total_params:,} || trainable%: {100 * trainable_params / total_params:.2f}")
+        else:
+            print("LoRA adapters disabled - using frozen base model")
+            # Freeze all parameters
+            for param in self.transformer.parameters():
+                param.requires_grad = False
         
-        self.transformer.transformer_blocks = new_blocks
-        print(f"✓ Injected physics attention into {len(self.physics_attns)} blocks")
+        # Conditionally inject physics cross-attention
+        if config.USE_PHYSICS_ATTENTION:
+            print("Injecting physics cross-attention...")
+            self.physics_attns = nn.ModuleList()
+            
+            original_blocks = self.transformer.transformer_blocks
+            new_blocks = nn.ModuleList()
+            
+            for original_block in original_blocks:
+                hidden_dim = original_block.attn1.to_q.in_features
+                physics_attn = PhysicsCrossAttention(
+                    query_dim=hidden_dim,
+                    context_dim=config.VFM_DIM,
+                    num_heads=8
+                )
+                modified_block = CogVideoXBlockWithPhysics(original_block, physics_attn)
+                new_blocks.append(modified_block)
+                self.physics_attns.append(physics_attn)
+            
+            self.transformer.transformer_blocks = new_blocks
+            print(f"✓ Injected physics attention into {len(self.physics_attns)} blocks")
+        else:
+            print("Physics cross-attention disabled - using original transformer blocks")
+            self.physics_attns = nn.ModuleList()  # Empty list for compatibility
         
     def forward(self, hidden_states, encoder_hidden_states, timestep, predicted_vfm,
                 timestep_cond=None, ofs=None, image_rotary_emb=None, return_dict=True):
@@ -435,15 +465,29 @@ class CogVideoXWithPhysics(nn.Module):
         hidden_states_patched = hidden_states_patched[:, text_seq_length:]
         
         # 3. Transformer blocks with physics attention
+        # Only pass physics_context if Physics Attention is enabled
+        physics_context = predicted_vfm if self.config.USE_PHYSICS_ATTENTION else None
+        
         for block in self.transformer.transformer_blocks:
-            hidden_states_patched, encoder_hidden_states_patched = block(
-                hidden_states=hidden_states_patched,
-                encoder_hidden_states=encoder_hidden_states_patched,
-                temb=emb,
-                image_rotary_emb=image_rotary_emb,
-                attention_kwargs=None,
-                physics_context=predicted_vfm,
-            )
+            # Check if block supports physics_context (CogVideoXBlockWithPhysics)
+            if isinstance(block, CogVideoXBlockWithPhysics):
+                hidden_states_patched, encoder_hidden_states_patched = block(
+                    hidden_states=hidden_states_patched,
+                    encoder_hidden_states=encoder_hidden_states_patched,
+                    temb=emb,
+                    image_rotary_emb=image_rotary_emb,
+                    attention_kwargs=None,
+                    physics_context=physics_context,
+                )
+            else:
+                # Original block without physics attention
+                hidden_states_patched, encoder_hidden_states_patched = block(
+                    hidden_states=hidden_states_patched,
+                    encoder_hidden_states=encoder_hidden_states_patched,
+                    temb=emb,
+                    image_rotary_emb=image_rotary_emb,
+                    attention_kwargs=None,
+                )
         
         # 4. Final normalization
         if not self.transformer.config.use_rotary_positional_embeddings:
@@ -547,16 +591,28 @@ class VideoPhysicsDataset(Dataset):
 def save_checkpoint(vdm, predictor, optimizer, epoch, step, config):
     config.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     
-    lora_path = config.CHECKPOINT_DIR / f'lora_epoch{epoch}_step{step}'
-    vdm.transformer.save_pretrained(lora_path)
+    # Only save LoRA if LoRA is enabled
+    if config.USE_LORA:
+        lora_path = config.CHECKPOINT_DIR / f'lora_epoch{epoch}_step{step}'
+        vdm.transformer.save_pretrained(lora_path)
     
     checkpoint = {
         'epoch': epoch,
         'step': step,
-        'physics_attns': [attn.state_dict() for attn in vdm.physics_attns],
-        'predictor': predictor.state_dict(),
-        'optimizer': optimizer.state_dict(),
+        'use_predictor': config.USE_PREDICTOR,
+        'use_lora': config.USE_LORA,
+        'use_physics_attention': config.USE_PHYSICS_ATTENTION,
     }
+    
+    # Conditionally save physics attention states
+    if config.USE_PHYSICS_ATTENTION:
+        checkpoint['physics_attns'] = [attn.state_dict() for attn in vdm.physics_attns]
+    
+    # Conditionally save predictor
+    if config.USE_PREDICTOR and predictor is not None:
+        checkpoint['predictor'] = predictor.state_dict()
+    
+    checkpoint['optimizer'] = optimizer.state_dict()
     
     path = config.CHECKPOINT_DIR / f'checkpoint_epoch{epoch}_step{step}.pt'
     torch.save(checkpoint, path)
@@ -565,29 +621,38 @@ def save_checkpoint(vdm, predictor, optimizer, epoch, step, config):
     # ========== WANDB: Save checkpoint (ADDED) ==========
     if wandb.run is not None:
         wandb.save(str(path))
-        wandb.save(str(lora_path / '*'))
+        if config.USE_LORA:
+            wandb.save(str(lora_path / '*'))
 
-def load_checkpoint(vdm, predictor, optimizer, checkpoint_path, device):
+def load_checkpoint(vdm, predictor, optimizer, checkpoint_path, device, config):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
     epoch = checkpoint['epoch']
     step = checkpoint['step']
     
-    lora_dir_name = Path(checkpoint_path).stem.replace('checkpoint_', 'lora_')
-    lora_path = Path(checkpoint_path).parent / lora_dir_name
+    # Load LoRA if enabled and checkpoint contains LoRA
+    if config.USE_LORA:
+        lora_dir_name = Path(checkpoint_path).stem.replace('checkpoint_', 'lora_')
+        lora_path = Path(checkpoint_path).parent / lora_dir_name
+        
+        if lora_path.exists():
+            from peft import PeftModel
+            vdm.transformer = PeftModel.from_pretrained(
+                vdm.transformer.base_model.model,
+                lora_path,
+                is_trainable=True
+            )
     
-    if lora_path.exists():
-        from peft import PeftModel
-        vdm.transformer = PeftModel.from_pretrained(
-            vdm.transformer.base_model.model,
-            lora_path,
-            is_trainable=True
-        )
+    # Load physics attention if enabled and checkpoint contains it
+    if config.USE_PHYSICS_ATTENTION and 'physics_attns' in checkpoint:
+        for i, state_dict in enumerate(checkpoint['physics_attns']):
+            if i < len(vdm.physics_attns):
+                vdm.physics_attns[i].load_state_dict(state_dict)
     
-    for i, state_dict in enumerate(checkpoint['physics_attns']):
-        vdm.physics_attns[i].load_state_dict(state_dict)
+    # Load predictor if enabled and checkpoint contains it
+    if config.USE_PREDICTOR and predictor is not None and 'predictor' in checkpoint:
+        predictor.load_state_dict(checkpoint['predictor'])
     
-    predictor.load_state_dict(checkpoint['predictor'])
     optimizer.load_state_dict(checkpoint['optimizer'])
     
     logging.info(f"✓ Resumed from epoch {epoch}, step {step}")
@@ -648,27 +713,46 @@ def train(config: Config):
     
     device = torch.device(config.DEVICE)
     
+    # Log ablation configuration
+    logging.info("=" * 60)
+    logging.info("ABLATION EXPERIMENT CONFIGURATION")
+    logging.info("=" * 60)
+    logging.info(f"USE_PREDICTOR: {config.USE_PREDICTOR}")
+    logging.info(f"USE_LORA: {config.USE_LORA}")
+    logging.info(f"USE_PHYSICS_ATTENTION: {config.USE_PHYSICS_ATTENTION}")
+    logging.info("=" * 60)
+    
     betas, alphas, alpha_bar = make_beta_schedule(config.T_STEPS)
     alpha_bar = alpha_bar.to(device)
     
     vdm = CogVideoXWithPhysics(config).to(device)
-    predictor = PredictorP(config).to(device)
     
-    trainable_params = vdm.get_trainable_parameters() + list(predictor.parameters())
+    # Conditionally create predictor
+    if config.USE_PREDICTOR:
+        predictor = PredictorP(config).to(device)
+        trainable_params = vdm.get_trainable_parameters() + list(predictor.parameters())
+    else:
+        predictor = None
+        trainable_params = vdm.get_trainable_parameters()
+        logging.info("Predictor P disabled - using ground truth VFM tokens")
     
     # ========== WANDB: Log parameter counts (ADDED) ==========
     vdm_trainable = sum(p.numel() for p in vdm.get_trainable_parameters())
-    predictor_trainable = sum(p.numel() for p in predictor.parameters())
+    predictor_trainable = sum(p.numel() for p in predictor.parameters()) if config.USE_PREDICTOR else 0
     total_trainable = vdm_trainable + predictor_trainable
     
     wandb.config.update({
         "vdm_trainable_params": vdm_trainable,
         "predictor_trainable_params": predictor_trainable,
         "total_trainable_params": total_trainable,
+        "use_predictor": config.USE_PREDICTOR,
+        "use_lora": config.USE_LORA,
+        "use_physics_attention": config.USE_PHYSICS_ATTENTION,
     })
     
     logging.info(f"VDM trainable params: {vdm_trainable:,}")
-    logging.info(f"Predictor trainable params: {predictor_trainable:,}")
+    if config.USE_PREDICTOR:
+        logging.info(f"Predictor trainable params: {predictor_trainable:,}")
     logging.info(f"Total trainable params: {total_trainable:,}")
     
     if config.USE_8BIT_ADAM:
@@ -687,7 +771,7 @@ def train(config: Config):
     start_step = 0
     if config.RESUME_FROM_CHECKPOINT:
         start_epoch, start_step = load_checkpoint(vdm, predictor, optimizer, 
-                                                  config.RESUME_FROM_CHECKPOINT, device)
+                                                  config.RESUME_FROM_CHECKPOINT, device, config)
     
     dataset = VideoPhysicsDataset(config.DATASET_INDEX, config, cache_in_memory=False)
     dataloader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True, 
@@ -703,7 +787,8 @@ def train(config: Config):
     
     for epoch in range(start_epoch, config.EPOCHS):
         vdm.train()
-        predictor.train()
+        if config.USE_PREDICTOR:
+            predictor.train()
         
         epoch_loss = 0.0
         epoch_l_diff = 0.0
@@ -720,8 +805,13 @@ def train(config: Config):
             
             z_t, noise = q_sample(z0, t, alpha_bar)
             
-            t_emb = sinusoidal_timestep_embedding(t, config.DIM_T)
-            predicted_vfm = predictor(z_t, text_tokens, t_emb)
+            # Conditionally predict VFM tokens or use ground truth
+            if config.USE_PREDICTOR:
+                t_emb = sinusoidal_timestep_embedding(t, config.DIM_T)
+                predicted_vfm = predictor(z_t, text_tokens, t_emb)
+            else:
+                # Use ground truth VFM tokens directly
+                predicted_vfm = vfm_tokens
             
             eps_hat = vdm(
                 hidden_states=z_t,
@@ -731,8 +821,14 @@ def train(config: Config):
             ).sample
             
             L_diff = F.mse_loss(eps_hat, noise)
-            L_pred = F.mse_loss(predicted_vfm, vfm_tokens)
-            loss = L_diff + config.LAMBDA_PRED * L_pred
+            
+            # Conditionally compute predictor loss
+            if config.USE_PREDICTOR:
+                L_pred = F.mse_loss(predicted_vfm, vfm_tokens)
+                loss = L_diff + config.LAMBDA_PRED * L_pred
+            else:
+                L_pred = torch.tensor(0.0, device=device)
+                loss = L_diff
             
             optimizer.zero_grad()
             loss.backward()
@@ -745,26 +841,35 @@ def train(config: Config):
             # Accumulate metrics
             epoch_loss += loss.item()
             epoch_l_diff += L_diff.item()
-            epoch_l_pred += L_pred.item()
+            if config.USE_PREDICTOR:
+                epoch_l_pred += L_pred.item()
             num_batches += 1
             
             # ========== WANDB: Log batch metrics (ADDED) ==========
             if global_step % config.WANDB_LOG_INTERVAL == 0:
-                wandb.log({
+                log_dict = {
                     "train/batch_loss": loss.item(),
                     "train/batch_l_diff": L_diff.item(),
-                    "train/batch_l_pred": L_pred.item(),
                     "train/grad_norm": grad_norm.item(),
                     "train/learning_rate": optimizer.param_groups[0]['lr'],
                     "train/step": global_step,
                     "train/epoch": epoch,
-                })
+                }
+                if config.USE_PREDICTOR:
+                    log_dict["train/batch_l_pred"] = L_pred.item()
+                wandb.log(log_dict)
             
             if global_step % config.LOG_EVERY == 0:
-                logging.info(
-                    f"Epoch {epoch} Step {global_step} Loss: {loss.item():.4f} "
-                    f"L_diff: {L_diff.item():.4f} L_pred: {L_pred.item():.4f}"
-                )
+                if config.USE_PREDICTOR:
+                    logging.info(
+                        f"Epoch {epoch} Step {global_step} Loss: {loss.item():.4f} "
+                        f"L_diff: {L_diff.item():.4f} L_pred: {L_pred.item():.4f}"
+                    )
+                else:
+                    logging.info(
+                        f"Epoch {epoch} Step {global_step} Loss: {loss.item():.4f} "
+                        f"L_diff: {L_diff.item():.4f}"
+                    )
             
             if global_step % config.SAVE_EVERY == 0 and global_step > 0:
                 save_checkpoint(vdm, predictor, optimizer, epoch, global_step, config)
@@ -774,19 +879,28 @@ def train(config: Config):
         # ========== WANDB: Log epoch metrics (ADDED) ==========
         avg_epoch_loss = epoch_loss / num_batches
         avg_epoch_l_diff = epoch_l_diff / num_batches
-        avg_epoch_l_pred = epoch_l_pred / num_batches
+        if config.USE_PREDICTOR:
+            avg_epoch_l_pred = epoch_l_pred / num_batches
         
-        wandb.log({
+        log_dict = {
             "train/epoch_loss": avg_epoch_loss,
             "train/epoch_l_diff": avg_epoch_l_diff,
-            "train/epoch_l_pred": avg_epoch_l_pred,
             "epoch": epoch,
-        })
+        }
+        if config.USE_PREDICTOR:
+            log_dict["train/epoch_l_pred"] = avg_epoch_l_pred
+        wandb.log(log_dict)
         
-        logging.info(
-            f"Epoch {epoch} Complete - Avg Loss: {avg_epoch_loss:.4f} "
-            f"Avg L_diff: {avg_epoch_l_diff:.4f} Avg L_pred: {avg_epoch_l_pred:.4f}"
-        )
+        if config.USE_PREDICTOR:
+            logging.info(
+                f"Epoch {epoch} Complete - Avg Loss: {avg_epoch_loss:.4f} "
+                f"Avg L_diff: {avg_epoch_l_diff:.4f} Avg L_pred: {avg_epoch_l_pred:.4f}"
+            )
+        else:
+            logging.info(
+                f"Epoch {epoch} Complete - Avg Loss: {avg_epoch_loss:.4f} "
+                f"Avg L_diff: {avg_epoch_l_diff:.4f}"
+            )
         
         save_checkpoint(vdm, predictor, optimizer, epoch, global_step, config)
     
