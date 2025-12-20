@@ -1,0 +1,38 @@
+# Requirements for comparison experiments
+# These are additional dependencies needed for evaluating comparison models
+
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+pillow>=9.0.0
+pandas>=1.5.0
+
+# Video evaluation metrics
+pytorch-msssim>=1.0.0  # For SSIM computation
+# frechet-video-distance  # Optional, requires tensorflow
+# Note: Install separately: pip install frechet-video-distance
+
+# CLIP for text-video similarity
+git+https://github.com/openai/CLIP.git  # Or: pip install git+https://github.com/openai/CLIP.git
+
+# Model-specific dependencies (install as needed)
+# OpenSora
+# git+https://github.com/hpcaitech/Open-Sora.git
+
+# VideoCrafter2
+# git+https://github.com/VideoCrafter/VideoCrafter2.git
+
+# HunyuanVideo
+# git+https://github.com/Tencent/HunyuanVideo.git
+
+# Optional: For better video processing
+opencv-python>=4.7.0
+imageio>=2.25.0
+imageio-ffmpeg>=0.4.8
+
+# Optional: For FVD computation (requires TensorFlow)
+# tensorflow>=2.10.0
+# frechet-video-distance
+
+
