@@ -75,10 +75,10 @@ class Config:
     MODEL_NAME = "THUDM/CogVideoX-2b"
     
     # Paths
-    CHECKPOINT_DIR = Path('/scratch/sk12590/PhysVideoGenerator/checkpoints')
-    LOG_DIR = Path('/scratch/sk12590/PhysVideoGenerator/logs')
+    CHECKPOINT_DIR = Path('/home/dj1380/PhysVideoGenerator/checkpoints')
+    LOG_DIR = Path('/home/dj1380/PhysVideoGenerator/logs')
 
-    DATASET_INDEX = '/scratch/sk12590/PhysVideoGenerator/data/indexed_dataset.json'
+    DATASET_INDEX = '/home/dj1380/PhysVideoGenerator/data/indexed_dataset.json'
     
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     USE_8BIT_ADAM = True

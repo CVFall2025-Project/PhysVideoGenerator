@@ -28,8 +28,8 @@ import pandas as pd
 from glob import glob
 from tqdm import tqdm
 
-from src.datasets import download_videos
-from src.datasets import clean_videos
+from src.pvg_datasets import download_videos
+from src.pvg_datasets import clean_videos
 from src.encoders.vae_encoder_decoder import VAEEncoder
 from src.encoders.vjepa2_encoder import VJEPA2Encoder
 from src.encoders.text_caption_enocder import TextEncoder
