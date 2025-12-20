@@ -1,67 +1,56 @@
 # PhysVideoGenerator
 
-> A physics-aware video generation framework leveraging CogVideoX with LoRA fine-tuning and VJEPA2 encoders
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Training](#training)
-- [Docker Setup](#docker-setup)
+A physics-aware video generation framework leveraging Latte Transformer with physics-informed training.
 
 ## Overview
 
-PhysVideoGenerator is a research framework for generating physics-aware videos from text descriptions. The system combines state-of-the-art video diffusion models with physics understanding through:
+PhysVideoGenerator is a research framework for generating physics-aware videos from text descriptions. The system extends the Latte (Latent Diffusion Transformer) architecture with physics-aware modifications to ensure generated videos follow physical laws and dynamics.
 
-- **CogVideoX** with LoRA adapters for efficient fine-tuning
-- **VJEPA2-style encoders** for video representation learning
-- **DiT (Diffusion Transformer)** architecture for video latent diffusion
-- **Physics-aware training** to ensure generated videos follow physical laws
+### Key Components
+
+- **Latte Transformer**: 3D Diffusion Transformer architecture for video generation
+- **Physics-Aware Training**: Custom training objectives that enforce physical constraints
+- **VAE Encoder/Decoder**: Efficient video compression and reconstruction
+- **T5-XXL Text Encoder**: High-quality text-to-video conditioning
+- **Evaluation Metrics**: Comprehensive video quality assessment (FID, SSIM, PSNR, LPIPS)
 
 ## Features
 
-- **Physics-Aware Video Generation**: Generate videos that respect physical constraints and dynamics
-- **Efficient Fine-Tuning**: LoRA (Low-Rank Adaptation) for parameter-efficient model adaptation
-- **Multi-Stage Pipeline**: Dataset preparation, encoding, and training workflows
-- **Flexible Architecture**: Modular design with separate encoder and decoder components
-- **GPU-Accelerated**: Optimized for CUDA-enabled GPUs
-- **Docker Support**: Containerized environment for reproducible results
+- **Physics-Informed Generation**: Videos that respect physical constraints and dynamics
+- **Text-to-Video Synthesis**: Generate videos from natural language descriptions
+- **Flexible Architecture**: Modular design with separate encoder, decoder, and transformer components
+- **Comprehensive Evaluation**: Built-in metrics for assessing video quality and physical accuracy
+- **GPU-Accelerated**: Optimized for CUDA-enabled GPUs with mixed precision training
+- **Streaming Dataset Support**: Memory-efficient data loading for large video datasets
 
 ## Project Structure
 
 ```
 PhysVideoGenerator/
-├── configs/              # Configuration files
-├── data/                 # Dataset storage
-├── dit/                  # Diffusion Transformer models
-│   ├── model.py         # DiT model architecture
-│   ├── layers.py        # Custom layers
-│   └── diffusion.py     # Diffusion process
-├── src/                  # Source code
-│   ├── encoders/        # Video and text encoders
-│   │   ├── vjepa2_encoder.py
-│   │   ├── vae_encoder_decoder.py
-│   │   └── text_caption_encoder.py
-│   ├── datasets/        # Dataset utilities
+├── data/                             # Dataset storagemodels 
+├── src/                              # Source code
+│   ├── encoders/                    # Video and text encoders
+│   │   ├── vae_encoder_decoder.py  # VAE for video compression
+│   │   └── text_caption_encoder.py # T5 text encoder
+│   ├── datasets/                    # Dataset utilities (legacy)
+│   │   ├── clean_videos.py
+│   │   ├── delete_videos.py
 │   │   ├── download_videos.py
-│   │   └── clean_videos.py
-│   ├── 01_prepare_video_dataset.py
-│   └── 02_cogvideox_physics_with_lora.py
-├── vae/                  # Variational Autoencoder components
-└── requirements.txt      # Python dependencies
+│   ├── latte_physics.py            # Latte Transformer with physics
+│   ├── train_latte_physics.py      # Training script
+│   ├── infer_latte_physics.py      # Inference script
+│   ├── evaluate_latte_physics.py   # Evaluation script
+│   └── 01_prepare_video_dataset_streaming.py  # Dataset preparation
+└── requirements.txt                 # Python dependencies
 ```
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8+
-- CUDA-capable GPU (recommended)
-- 16GB+ GPU memory for training
+- Python 3.12+
+- CUDA-capable GPU (16GB+ VRAM recommended)
+- PyTorch 2.9.1 with CUDA support
 
 ### Setup
 
@@ -86,99 +75,144 @@ pip install -r requirements.txt
 
 ### 1. Prepare Dataset
 
-Download and prepare video datasets:
+Prepare video datasets with streaming support for large collections:
 
 ```bash
-python src/01_prepare_video_dataset.py
-```
-
-For streaming datasets:
-```bash
+python src/datasets/download_videos.py
 python src/01_prepare_video_dataset_streaming.py
 ```
 
+These scripts:
+- Download OpenVid-1M dataset
+- Using pre-trained encoders (VJEPA-2, Latte-1 VAE, T5), prepare embedded latents and tokens
+
 ### 2. Train Physics-Aware Model
 
-Train the CogVideoX model with LoRA adapters:
+Train the Latte Transformer with physics-informed objectives:
 
 ```bash
-python src/02_cogvideox_physics_with_lora.py
+python src/train_latte_physics.py
 ```
 
-### 3. Generate Videos
+**Key Training Features:**
+- Physics-aware loss functions
+- Mixed precision training (bfloat16)
+- Gradient checkpointing for memory efficiency
+- Checkpoint saving and resumption
 
-Once trained, use the model to generate physics-aware videos from text prompts.
+### 3. Generate Videos (Inference)
+
+Generate physics-aware videos from text prompts:
+
+```bash
+python src/infer_latte_physics.py
+```
+
+**Inference Configuration:**
+- Customizable resolution (default: 256x256)
+- Adjustable video length (default: 16 frames)
+- DDIM sampling with configurable steps
+- Guidance scale for text conditioning strength
+
+### 4. Evaluate Generated Videos
+
+Assess video quality using multiple metrics:
+
+```bash
+python src/evaluate_latte_physics.py
+```
+
+**Evaluation Metrics:**
+- **FID (Frechet Inception Distance)**: Overall visual quality
+- **SSIM (Structural Similarity Index)**: Frame-level structural similarity
+- **PSNR (Peak Signal-to-Noise Ratio)**: Pixel-level reconstruction quality
+- **LPIPS (Learned Perceptual Image Patch Similarity)**: Perceptual similarity
 
 ## Configuration
 
-Key configuration parameters in `src/02_cogvideox_physics_with_lora.py`:
-
-```python
-BATCH_SIZE = 2              # Batch size for training
-T_STEPS = 1000              # Diffusion timesteps
-EPOCHS = 30                 # Training epochs
-LORA_RANK = 64              # LoRA rank (64 for new concepts)
-LORA_ALPHA = 64             # LoRA alpha scaling
-ADAPTER_LR = 1e-3           # Learning rate for adapters
-```
-
-### LoRA Configuration
-
-The model uses LoRA for efficient fine-tuning with the following target modules:
-- Attention projections: `to_q`, `to_k`, `to_v`, `to_out.0`
-- Feed-forward layers: `ff.net.0.proj`, `ff.net.2`
-
-## Training
-
 ### Model Architecture
 
-- **VAE Latent Shape**: `[B, 16, 13, 60, 90]` (Channels, Temporal, Height, Width)
-- **VFM Sequence Length**: 6144 tokens
-- **VFM Dimension**: 1408
-- **Text Sequence Length**: 128 tokens
-- **Text Dimension**: 1024
-
-### Training Tips
-
-1. Start with a small dataset (50-100 videos) for initial experiments
-2. Use gradient checkpointing to reduce memory usage
-3. Monitor physics loss alongside reconstruction loss
-4. Adjust `LAMBDA_PRED` to balance physics awareness vs. visual quality
-
-### Checkpointing
-
-Resume training from a checkpoint:
 ```python
-RESUME_FROM_CHECKPOINT = 'checkpoints/checkpoint_epoch5_step1000.pt'
+# Latte Transformer Configuration
+num_attention_heads = 16
+attention_head_dim = 72
+in_channels = 4              # VAE latent channels
+out_channels = 4
+num_layers = 28
+sample_size = 32             # 256/8 (VAE downsampling factor)
+patch_size = 2
+caption_channels = 4096      # T5-XXL embedding dimension
+video_length = 16            # Number of frames
 ```
 
-## Docker Setup
+### Training Parameters
 
-### Build Image
-
-```bash
-docker build -t vjepa2-diffusion .
+```python
+# Training Configuration
+BATCH_SIZE = 4
+LEARNING_RATE = 1e-4
+NUM_EPOCHS = 50
+NUM_DIFFUSION_STEPS = 1000
+GUIDANCE_SCALE = 7.5
+MIXED_PRECISION = "bf16"     # bfloat16 for stability
+GRADIENT_CHECKPOINTING = True
 ```
 
-### Run Container (GPU)
+### Inference Settings
 
-```bash
-docker run --gpus all -it --shm-size=16g vjepa2-diffusion
+```python
+# Inference Configuration
+NUM_FRAMES = 16
+HEIGHT = 256
+WIDTH = 256
+NUM_INFERENCE_STEPS = 50
+GUIDANCE_SCALE = 7.5
+FPS = 8                      # Output video frame rate
 ```
 
-The container includes:
-- PyTorch with CUDA support
-- All required dependencies
-- Pre-configured environment
+## Model Details
+
+### VAE Encoder/Decoder
+- **Base Model**: `maxin-cn/Latte-1`
+- **Latent Channels**: 4
+- **Spatial Compression**: 8x (256 → 32)
+- **Dtype**: bfloat16 for memory efficiency
+
+### Text Encoder
+- **Model**: T5-XXL (`google/t5-v1_1-xxl`)
+- **Embedding Dimension**: 4096
+- **Max Sequence Length**: 128 tokens
+
+### Diffusion Scheduler
+- **Type**: DDIM (Denoising Diffusion Implicit Models)
+- **Base Config**: From Latte-1 pretrained model
+- **Training Steps**: 1000
+- **Inference Steps**: 50 (configurable)
+
 
 ## Dependencies
 
-- **PyTorch** (2.9.1): Deep learning framework
-- **Diffusers** (0.35.2): Diffusion models library
-- **Transformers** (4.57.3): NLP and multimodal models
-- **PEFT** (0.14.0): Parameter-efficient fine-tuning
-- **Decord**: Efficient video loading
-- **OpenCV**: Image processing
+Core dependencies from `requirements.txt`:
+
+- **torch** (2.9.1): Deep learning framework
+- **torchvision** (0.24.1): Computer vision utilities
+- **diffusers** (0.35.2): Diffusion models library
+- **transformers** (4.57.3): NLP and multimodal models
+- **accelerate** (1.12.0): Distributed training utilities
+- **decord**: Efficient video loading
+- **imageio** (2.37.2): Video I/O
+- **opencv-python** (4.12.0.88): Image processing
+- **lpips**: Perceptual similarity metric
+- **torchmetrics**: Video quality metrics
+
+
+## Known Limitations
+
+- Requires significant GPU memory (16GB+ recommended)
+- Training can be time-intensive for large datasets
+- Generated videos currently limited to 256x256 resolution
+- Physics constraints implementation is domain-specific
+
 
 ## License
 
@@ -186,6 +220,7 @@ This project is for research and educational purposes.
 
 ## Acknowledgments
 
-- CogVideoX team for the base video generation model
-- Meta AI for VJEPA architecture insights
-- Diffusers library by Hugging Face
+- **Latte Team**: For the foundational Latent Diffusion Transformer architecture
+- **Hugging Face**: For the Diffusers and Transformers libraries
+- **Stability AI**: For diffusion model research and development
+- **Google**: For the T5 text encoder models

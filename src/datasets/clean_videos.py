@@ -1,24 +1,3 @@
-"""clean_videos_2.py
-
-Process raw videos into two separate cleaned formats:
- - VAE pipeline: 480×720, 49 frames, normalized to [-1, 1]
- - VJEPA2 pipeline: 256×256, 48 frames, ImageNet normalized [0,1]
-
-Class-based design for flexibility and reusability.
-
-Usage:
-    processor = VideoProcessor(target_fps=12)
-    
-    # Process single video
-    frames = load_video(path)  # (T, H, W, 3) uint8
-    outputs = processor.process_video(frames)
-    # outputs['vae'] -> (3, 49, 480, 720) in [-1, 1]
-    # outputs['vjepa'] -> (3, 48, 256, 256) ImageNet normalized
-    
-    # Batch process folder
-    processor.process_folder("data/video", "data/processed")
-"""
-
 from __future__ import annotations
 
 import os
@@ -107,11 +86,8 @@ class VideoProcessor:
     def __init__(
         self,
         target_fps: int = 12,
-        vae_height: int = 480,
-        vae_width: int = 720,
-        vae_frames: int = 49,
-        vjepa_size: int = 256,
-        vjepa_frames: int = 48,
+        frame_size: int = 256,
+        num_frames: int = 16,
         vjepa_mean: Tuple[float, float, float] = (0.485, 0.456, 0.406),
         vjepa_std: Tuple[float, float, float] = (0.229, 0.224, 0.225),
         use_decord: bool = True,
@@ -130,11 +106,8 @@ class VideoProcessor:
             device: torch device for processing
         """
         self.target_fps = target_fps
-        self.vae_height = vae_height
-        self.vae_width = vae_width
-        self.vae_frames = vae_frames
-        self.vjepa_size = vjepa_size
-        self.vjepa_frames = vjepa_frames
+        self.frame_size = frame_size
+        self.num_frames = num_frames
         self.vjepa_mean = vjepa_mean
         self.vjepa_std = vjepa_std
         self.use_decord = use_decord
@@ -143,10 +116,6 @@ class VideoProcessor:
         if torch is None:
             raise RuntimeError("PyTorch is required. Install torch and torchvision.")
 
-        logger.info(
-            f"VideoProcessor initialized: VAE=[{vae_height}x{vae_width}, {vae_frames}f], "
-            f"VJEPA2=[{vjepa_size}x{vjepa_size}, {vjepa_frames}f]"
-        )
 
     def load_video(self, path: str) -> np.ndarray:
         """Load video and resample to target fps."""
@@ -167,8 +136,8 @@ class VideoProcessor:
         
         Returns:
             {
-                "vae": (3, 49, 480, 720) float32 in [-1, 1],
-                "vjepa": (3, 48, 256, 256) float32 ImageNet normalized
+                "vae": (3, 16, 256, 256) float32 in [-1, 1],
+                "vjepa": (3, 16, 256, 256) float32 ImageNet normalized
             }
         """
         # Convert to torch tensor (T, H, W, 3) and move to device
@@ -177,41 +146,36 @@ class VideoProcessor:
         # Permute to (T, 3, H, W) for torchvision ops
         video_tensor = video_tensor.permute(0, 3, 1, 2)  # [T, 3, H, W]
 
-        # ---------------------------------------------------------
-        # Pipeline A: VAE (480x720, 49 frames, [-1, 1])
-        # ---------------------------------------------------------
-        vae_video = F.resize(video_tensor, [self.vae_height, self.vae_width])
-
-        # Temporal sampling to exactly vae_frames
-        T_vae = vae_video.shape[0]
-        vae_indices = torch.linspace(0, T_vae - 1, self.vae_frames, device=video_tensor.device).long()
-        vae_video = vae_video[vae_indices]
-
-        # Normalize to [-1, 1]
-        vae_video = (vae_video / 127.5) - 1.0
-
-        # Permute to [3, 49, 480, 720] for VAE input
-        vae_video = vae_video.permute(1, 0, 2, 3).unsqueeze(0)  # [1, 3, 49, 480, 720]
-
-        # ---------------------------------------------------------
-        # Pipeline B: VJEPA2 (256x256, 48 frames, ImageNet normalized)
-        # ---------------------------------------------------------
-        # Center crop to square (preserve aspect ratio)
         H_orig = video_tensor.shape[2]
         W_orig = video_tensor.shape[3]
         min_dim = min(H_orig, W_orig)
-        vjepa_video = F.center_crop(video_tensor, [min_dim, min_dim])
 
-        # Resize to target size (256x256)
-        vjepa_video = F.resize(vjepa_video, [self.vjepa_size, self.vjepa_size])
+        video = F.center_crop(video_tensor, [min_dim, min_dim])
+        video = F.resize(video, [self.frame_size, self.frame_size])
 
-        # Temporal sampling to exactly vjepa_frames
-        T_vjepa = vjepa_video.shape[0]
-        vjepa_indices = torch.linspace(0, T_vjepa - 1, self.vjepa_frames, device=video_tensor.device).long()
-        vjepa_video = vjepa_video[vjepa_indices]
+        T = video.shape[0]
 
+        indices = torch.linspace(0, T - 1, self.num_frames, device=video_tensor.device).long()
+
+        video = video[indices]
+
+
+        # ---------------------------------------------------------
+        # Pipeline A: VAE (256x256, 16 frames, [-1, 1])
+        # ---------------------------------------------------------
+        # Normalize to [-1, 1]
+        vae_video = video.clone().detach()
+        vae_video = (vae_video / 127.5) - 1.0
+
+        # Permute to [1, 16, 3 , 256, 256] for VAE input
+        vae_video = vae_video.unsqueeze(0)
+
+        # ---------------------------------------------------------
+        # Pipeline B: VJEPA2 (256x256, 16 frames, ImageNet normalized)
+        # ---------------------------------------------------------
         # Normalize to [0, 1] then apply ImageNet normalization
-        vjepa_video = vjepa_video / 255.0
+        vjepa_video = video.clone().detach()
+        vjepa_video = video / 255.0
 
         # Apply ImageNet normalization per-channel
         for c in range(3):
@@ -219,8 +183,8 @@ class VideoProcessor:
 
         # Move outputs back to CPU and convert to numpy for saving (keeps API unchanged)
         return {
-            "vae": vae_video.cpu().numpy().astype(np.float32), # [1, 3, 49, 480, 720]
-            "vjepa": vjepa_video.cpu().numpy().astype(np.float32), # [48, 3, 256, 256]
+            "vae": vae_video.cpu().numpy().astype(np.float16), # [1, 16, 3, 256, 256]
+            "vjepa": vjepa_video.cpu().numpy().astype(np.float16), # [16, 3, 256, 256]
         }
 
     def process_video_to_file(
