@@ -1,413 +1,642 @@
-"""
-metrics_research.py
-Research-grade metrics for video evaluation (Option A).
-Requires: GPU for FVD (I3D) + RAFT recommended for speed; CPU works but slow.
+"""Metrics for video evaluation.
 
-Usage examples provided at bottom of file.
+This module provides functions to compute temporal LPIPS (t-LPIPS) metric
+and optical flow consistency metric for evaluating video quality and temporal consistency.
 """
+
+from __future__ import annotations
 
 import os
-import sys
-import subprocess
+import tempfile
+import shutil
+from typing import Optional, Tuple
+
 import numpy as np
 import torch
-import torch.nn.functional as F
-import cv2
-from skimage.metrics import structural_similarity as ssim_sk
-from decord import VideoReader, cpu
-from torchvision import transforms
-from PIL import Image
-from einops import rearrange
+import torchvision.transforms as T
 import lpips
-from typing import List, Tuple, Optional
+import cv2
 
-# -------------------------
-# GPU / device
-# -------------------------
-device = "cuda" if torch.cuda.is_available() else "cpu"
+try:
+    import decord
+    decord.bridge.set_bridge("native")
+except Exception:
+    decord = None
 
-# -------------------------
-# Helpers: frame extraction
-# -------------------------
-def read_video_frames(video_path: str, resize: Optional[Tuple[int,int]] = None, max_frames: Optional[int]=None):
+
+def load_video_for_lpips(path: str, size: int = 224) -> torch.Tensor:
+    """Load video and prepare it for LPIPS computation.
+    
+    Args:
+        path: Path to video file
+        size: Target size for resizing (default: 224)
+    
+    Returns:
+        frames: Tensor of shape [T, 3, H, W] normalized to [-1, 1]
+    
+    Raises:
+        ImportError: If decord is not available
+        FileNotFoundError: If video file doesn't exist
     """
-    Returns frames as list of RGB uint8 arrays [H,W,3].
-    Uses decord (fast).
-    """
-    vr = VideoReader(video_path, ctx=cpu(0))
-    nframes = len(vr)
-    if max_frames is not None and nframes > max_frames:
-        # uniform sampling
-        idx = np.linspace(0, nframes-1, max_frames).astype(int).tolist()
-        batch = vr.get_batch(idx).asnumpy()
-    else:
-        batch = vr.get_batch(range(nframes)).asnumpy()
-    frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in batch]
-    if resize is not None:
-        frames = [cv2.resize(f, resize[::-1], interpolation=cv2.INTER_LINEAR) for f in frames]
-    return frames
+    if decord is None:
+        raise ImportError("decord is required for video loading. Please install it.")
+    
+    vr = decord.VideoReader(path)
+    frames = vr.get_batch(range(len(vr)))  # T x H x W x 3, uint8
 
-# -------------------------
-# 1) FVD (calls Google official frechet_video_distance)
-# -------------------------
-def compute_fvd_with_google_repo(real_videos_dir: str, gen_videos_dir: str, fvd_repo_path: str, i3d_checkpoint_path: str, tmp_stats_dir: str="/tmp/fvd_stats"):
-    """
-    Uses the official repo (google-research/frechet_video_distance).
-    Steps:
-      1) compute stats for the reference set (if not already)
-      2) compute stats for generated set
-      3) run compute_fvd.py with both stats -> score
-    Requirements:
-      - fvd_repo_path: path to cloned frechet_video_distance repo
-      - i3d_checkpoint_path: path to I3D checkpoint expected by the repo (see repo README)
-    """
-    # sanity checks
-    if not os.path.isdir(fvd_repo_path):
-        raise FileNotFoundError("fvd_repo_path not found: " + fvd_repo_path)
-    if not os.path.exists(i3d_checkpoint_path):
-        raise FileNotFoundError("i3d_checkpoint_path not found: " + i3d_checkpoint_path)
-    os.makedirs(tmp_stats_dir, exist_ok=True)
+    frames = frames.permute(0, 3, 1, 2).float() / 255.0  # TCHW
 
-    # compute stats for reference
-    ref_stats = os.path.join(tmp_stats_dir, "ref_stats.npz")
-    gen_stats = os.path.join(tmp_stats_dir, "gen_stats.npz")
-
-    # helper to run python inside repo
-    def run_cmd(cmd_args):
-        print("RUN:", " ".join(cmd_args))
-        res = subprocess.run(cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        print(res.stdout)
-        if res.returncode != 0:
-            print(res.stderr, file=sys.stderr)
-            raise RuntimeError("Command failed: " + " ".join(cmd_args))
-        return res
-
-    # 1) compute reference stats if not present
-    if not os.path.exists(ref_stats):
-        run_cmd([
-            sys.executable,
-            os.path.join(fvd_repo_path, "compute_statistics.py"),
-            "--kinetics_i3d_ckpt", i3d_checkpoint_path,
-            "--videos_dir", real_videos_dir,
-            "--output_path", ref_stats,
-        ])
-
-    # 2) compute generated stats
-    run_cmd([
-        sys.executable,
-        os.path.join(fvd_repo_path, "compute_statistics.py"),
-        "--kinetics_i3d_ckpt", i3d_checkpoint_path,
-        "--videos_dir", gen_videos_dir,
-        "--output_path", gen_stats,
+    transform = T.Compose([
+        T.Resize((size, size)),
+        T.Normalize(mean=[0.5, 0.5, 0.5],
+                    std=[0.5, 0.5, 0.5])
     ])
 
-    # 3) compute fvd
-    res = run_cmd([
-        sys.executable,
-        os.path.join(fvd_repo_path, "compute_fvd.py"),
-        "--statistics_real", ref_stats,
-        "--statistics_fake", gen_stats,
-    ])
-    # parse output
-    out = res.stdout
-    # The script prints FVD result; parse last numeric occurrence
-    import re
-    nums = re.findall(r"[-+]?\d*\.\d+|\d+", out)
-    if len(nums) == 0:
-        raise RuntimeError("Could not parse FVD output.")
-    return float(nums[-1])
+    frames = transform(frames)  # apply per-frame transform
+    return frames  # [T, 3, H, W]
 
-# -------------------------
-# 2) t-LPIPS (temporal LPIPS)
-# -------------------------
-# Use official LPIPS (alexnet or vgg)
-_lpips_model = None
-def get_lpips_model(net="alex"):
-    global _lpips_model
-    if _lpips_model is None:
-        _lpips_model = lpips.LPIPS(net=net).to(device).eval()
-    return _lpips_model
 
-def compute_t_lpips(frames: List[np.ndarray], resize=(256,256), net="alex"):
+class TLPIPS:
+    """Temporal LPIPS metric calculator.
+    
+    Computes LPIPS between consecutive frames and returns the average.
     """
-    frames: list of RGB numpy arrays uint8
-    returns: mean LPIPS between consecutive frames
-    """
-    model = get_lpips_model(net=net)
-    preprocess = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize(resize),
-        transforms.ToTensor(),  # [0,1]
-        transforms.Normalize([0.5,0.5,0.5],[0.5,0.5,0.5])  # to [-1,1]
-    ])
-    tensors = [preprocess(f).unsqueeze(0).to(device) for f in frames]
-    vals = []
-    with torch.no_grad():
-        for i in range(len(tensors)-1):
-            a = tensors[i]
-            b = tensors[i+1]
-            d = model(a, b)  # returns tensor [1,1,1,1] shape; .item()
-            vals.append(d.item())
-    return float(np.mean(vals)) if vals else 0.0
+    
+    def __init__(self, net: str = 'vgg', device: str = 'cuda'):
+        """Initialize the LPIPS model.
+        
+        Args:
+            net: Network type for LPIPS ('vgg' or 'alex')
+            device: Device to run computation on ('cuda' or 'cpu')
+        """
+        self.device = device
+        self.lpips_model = lpips.LPIPS(net=net).to(device).eval()
+    
+    def compute(self, frames: torch.Tensor) -> float:
+        """Compute temporal LPIPS score.
+        
+        Args:
+            frames: torch tensor [T, 3, H, W], normalized to [-1, 1]
+        
+        Returns:
+            Average LPIPS score across consecutive frame pairs
+        """
+        frames = frames.to(self.device)
+        T_len = frames.shape[0]
 
-# -------------------------
-# 3) Optical Flow Consistency (RAFT, forward-backward occlusion-aware)
-# -------------------------
-# This requires RAFT repo and RAFT checkpoint (e.g., raft-sintel.pth).
-# We'll use RAFT to compute flow then warp and compute forward-backward error with occlusion mask.
-# Assumes RAFT repo is cloned and RAFT model is loadable as module via sys.path insertion.
-def import_raft(raft_repo_path: str):
-    # add RAFT to path
-    if raft_repo_path not in sys.path:
-        sys.path.insert(0, raft_repo_path)
+        if T_len < 2:
+            raise ValueError("Video must have at least 2 frames to compute t-LPIPS")
+
+        scores = []
+        with torch.no_grad():
+            for t in range(T_len - 1):
+                d = self.lpips_model(
+                    frames[t].unsqueeze(0),
+                    frames[t+1].unsqueeze(0)
+                )
+                scores.append(d.item())
+
+        return sum(scores) / len(scores)
+
+
+def compute_t_lpips(frames: torch.Tensor, net: str = 'vgg', device: str = 'cuda') -> float:
+    """Compute temporal LPIPS metric for a video.
+    
+    Convenience function that creates a TLPIPS instance and computes the score.
+    
+    Args:
+        frames: torch tensor [T, 3, H, W], normalized to [-1, 1]
+        net: Network type for LPIPS ('vgg' or 'alex')
+        device: Device to run computation on ('cuda' or 'cpu')
+    
+    Returns:
+        Average LPIPS score across consecutive frame pairs
+    """
+    calculator = TLPIPS(net=net, device=device)
+    return calculator.compute(frames)
+
+
+def calculate_dense_optical_flow(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[float, np.ndarray]:
+    """Calculate the dense optical flow between two frames using the Farneback method.
+    
+    Args:
+        frame1: First frame as numpy array (H, W, 3) in BGR format
+        frame2: Second frame as numpy array (H, W, 3) in BGR format
+    
+    Returns:
+        Tuple of (average_magnitude, flow) where:
+        - average_magnitude: Average magnitude of flow vectors
+        - flow: 2-channel array (x and y components of motion vectors)
+    
+    Raises:
+        ValueError: If frames are None or have incompatible shapes
+    """
+    if frame1 is None or frame2 is None:
+        raise ValueError("Error: one or both frames are None")
+    
+    if frame1.shape != frame2.shape:
+        raise ValueError(f"Frame shapes don't match: {frame1.shape} vs {frame2.shape}")
+    
+    # Convert to grayscale (required for Farneback)
+    prvs = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+    next_frame = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+    
+    # Calculate optical flow (Farneback parameters are common defaults)
+    # The 'flow' result is a 2-channel array (x and y components of the motion vector)
+    flow = cv2.calcOpticalFlowFarneback(
+        prvs,
+        next_frame,
+        None,
+        0.5,   # pyr_scale
+        3,     # levels
+        15,    # winsize
+        3,     # iterations
+        5,     # poly_n
+        1.2,   # poly_sigma
+        0      # flags
+    )
+    
+    # flow[:,:,0] is the u component (horizontal motion)
+    # flow[:,:,1] is the v component (vertical motion)
+    
+    # Calculate the magnitude of the flow vectors: sqrt(u^2 + v^2)
+    # This magnitude is the *speed* of motion at each pixel.
+    magnitude = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+    
+    # Calculate the average magnitude across the entire frame
+    average_magnitude = np.mean(magnitude)
+    
+    return average_magnitude, flow
+
+
+def calculate_optical_flow_consistency_score(
+    video_path: str,
+    max_frames: Optional[int] = None,
+    temp_dir: Optional[str] = None,
+    use_decord: bool = True
+) -> float:
+    """Calculate the average optical flow magnitude over all consecutive frame pairs.
+    
+    This metric measures temporal consistency by computing the average magnitude
+    of optical flow between consecutive frames. Lower scores indicate smoother
+    transitions (higher consistency), while higher scores indicate more drastic
+    motion (lower consistency).
+    
+    Args:
+        video_path: Path to video file
+        max_frames: Maximum number of frames to process (None for all frames)
+        temp_dir: Temporary directory for frame extraction (None for auto-generated)
+        use_decord: Whether to use decord for video loading (faster) or cv2
+    
+    Returns:
+        Average optical flow magnitude (pixels/frame)
+    """
+    flow_magnitudes = []
+    cleanup_temp = False
+    
     try:
-        import raft
-        return raft
+        if use_decord and decord is not None:
+            # Use decord for faster loading
+            vr = decord.VideoReader(video_path)
+            num_frames = len(vr)
+            if max_frames:
+                num_frames = min(num_frames, max_frames)
+            
+            frames = vr.get_batch(range(num_frames))  # T x H x W x 3, uint8
+            frames_np = frames.asnumpy()  # Convert to numpy
+            
+            # Calculate optical flow between consecutive pairs
+            for i in range(num_frames - 1):
+                frame1 = frames_np[i]  # H x W x 3, RGB
+                frame2 = frames_np[i + 1]
+                
+                # Convert RGB to BGR for OpenCV
+                frame1_bgr = cv2.cvtColor(frame1, cv2.COLOR_RGB2BGR)
+                frame2_bgr = cv2.cvtColor(frame2, cv2.COLOR_RGB2BGR)
+                
+                try:
+                    avg_mag, _ = calculate_dense_optical_flow(frame1_bgr, frame2_bgr)
+                    flow_magnitudes.append(avg_mag)
+                except Exception as e:
+                    continue
+        
+        else:
+            # Fallback to cv2 with temporary frame extraction
+            if temp_dir is None:
+                temp_dir = tempfile.mkdtemp(prefix='optical_flow_')
+                cleanup_temp = True
+            else:
+                os.makedirs(temp_dir, exist_ok=True)
+            
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise ValueError(f"Error opening video file: {video_path}")
+            
+            frame_paths = []
+            frame_count = 0
+            
+            # Extract and save frames
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                frame_path = os.path.join(temp_dir, f"frame_{frame_count:04d}.png")
+                cv2.imwrite(frame_path, frame)
+                frame_paths.append(frame_path)
+                
+                frame_count += 1
+                if max_frames and frame_count >= max_frames:
+                    break
+            
+            cap.release()
+            
+            # Calculate optical flow between consecutive pairs
+            for i in range(len(frame_paths) - 1):
+                frame1 = cv2.imread(frame_paths[i])
+                frame2 = cv2.imread(frame_paths[i + 1])
+                
+                if frame1 is None or frame2 is None:
+                    continue
+                
+                try:
+                    avg_mag, _ = calculate_dense_optical_flow(frame1, frame2)
+                    flow_magnitudes.append(avg_mag)
+                except Exception as e:
+                    continue
+            
+            # Clean up temporary directory
+            if cleanup_temp and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+    
     except Exception as e:
-        raise ImportError("Could not import RAFT. Ensure RAFT repo is at raft_repo_path and contains __init__.py. Error: " + str(e))
+        if cleanup_temp and temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        raise RuntimeError(f"Error processing video {video_path}: {e}")
+    
+    if not flow_magnitudes:
+        return 0.0
+    
+    # Calculate the final score
+    average_flow_consistency_score = np.mean(flow_magnitudes)
+    
+    return average_flow_consistency_score
 
-def load_raft_model(raft_repo_path: str, ckpt_path: str):
-    raft = import_raft(raft_repo_path)
-    # RAFT repo typical API has a create_model function or model class; adapt if necessary
-    # We'll follow typical RAFT patterns (the exact import path may differ)
-    from raft import RAFT  # may need change depending on repo structure
-    model = RAFT().to(device)
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(checkpoint)
-    model.eval()
-    return model
 
-def flow_warp(flow, coords):
+# VideoPhy metrics - require model checkpoints
+class VideoPhyEvaluator:
+    """VideoPhy (original) evaluator for SA and PC scores.
+    
+    Uses entailment-based inference that outputs scores 0-1.
+    Requires checkpoint from: https://huggingface.co/videophysics/videocon_physics
     """
-    Warp flow field 'flow' from its native coords to coords using bilinear sampling.
-    flow: [H,W,2] numpy
-    coords: two arrays X,Y of same shape
-    returns: sampled flow at coords shape [H,W,2]
-    """
-    h,w = flow.shape[:2]
-    X = np.clip(np.round(coords[0]).astype(int), 0, w-1)
-    Y = np.clip(np.round(coords[1]).astype(int), 0, h-1)
-    return flow[Y, X]
-
-def compute_flow_consistency_raft(frames: List[np.ndarray], raft_repo_path: str, raft_ckpt_path: str):
-    """
-    frames: list of RGB uint8 frames
-    Uses RAFT to compute flow F_t (t->t+1). Then warps backward flow and computes:
-      err_t = mean(||F_t + warp(B_{t+1})(x)||) masked by occlusion
-    Masking: use small-threshold occlusion detection by checking differences magnitude ratio.
-
-    Returns: mean forward-backward error over frames.
-    """
-    # load RAFT model
-    # NOTE: RAFT import may vary by repo. You might need to adapt to repo's naming.
-    # For performance, convert frames to floats and normalized tensors
-    import importlib
-    # try to import RAFT inference util if the repo provides it; else fallback to Farneback for CPU
-    try:
-        raft = import_raft(raft_repo_path)
-        # instantiate RAFT model; the RAFT API differs, so the project-specific script may have an 'inference' helper
-        # Many RAFT repos have a function 'demo.py' which loads model and runs inference. For robust use, call that script.
-        # For brevity here, if RAFT isn't easily importable, fallback to Farneback (slower but robust).
-        from raft import RAFT  # may fail depending on repo layout
-        model = RAFT().to(device)
-        ckpt = torch.load(raft_ckpt_path, map_location=device)
-        model.load_state_dict(ckpt)
-        model.eval()
-        use_raft = True
-    except Exception as e:
-        print("RAFT import/init failed:", e)
-        print("Falling back to OpenCV Farneback for flow (research-grade RAFT recommended).")
-        use_raft = False
-
-    h,w = frames[0].shape[:2]
-    fb_errors = []
-    for t in range(len(frames)-2):
-        im1 = frames[t]
-        im2 = frames[t+1]
-        im3 = frames[t+2]
-
-        gray1 = cv2.cvtColor(im1, cv2.COLOR_RGB2GRAY)
-        gray2 = cv2.cvtColor(im2, cv2.COLOR_RGB2GRAY)
-        gray3 = cv2.cvtColor(im3, cv2.COLOR_RGB2GRAY)
-
-        if use_raft:
-            # Convert to torch tensor [1,3,H,W] normalized to [0,1]
-            def to_tensor_np(img):
-                x = torch.from_numpy(img.astype('float32') / 255.0).permute(2,0,1).unsqueeze(0).to(device)
-                return x
+    
+    def __init__(self, checkpoint_path: str, device: str = 'cuda', batch_size: int = 16):
+        """Initialize VideoPhy evaluator.
+        
+        Args:
+            checkpoint_path: Path to VideoPhy checkpoint directory
+            device: Device to run computation on
+            batch_size: Batch size for inference
+        """
+        self.checkpoint_path = checkpoint_path
+        self.device = device
+        self.batch_size = batch_size
+        self.model = None
+        self.tokenizer = None
+        self.processor = None
+        self._initialized = False
+    
+    def _initialize(self):
+        """Lazy initialization of model components."""
+        if self._initialized:
+            return
+        
+        try:
+            import sys
+            import os
+            # Add VideoPhy paths to sys.path
+            videophy_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'VideoPhy', 'videocon', 'training', 'pipeline_video'
+            )
+            if videophy_path not in sys.path:
+                sys.path.insert(0, videophy_path)
+            
+            from transformers.models.llama.tokenization_llama import LlamaTokenizer
+            from mplug_owl_video.modeling_mplug_owl import MplugOwlForConditionalGeneration
+            from mplug_owl_video.processing_mplug_owl import MplugOwlImageProcessor, MplugOwlProcessor
+            from data_utils.xgpt3_dataset import MultiModalDataset
+            from utils import batchify
+            from torch.utils.data import DataLoader
+            import torch.nn as nn
+            
+            self.tokenizer = LlamaTokenizer.from_pretrained(self.checkpoint_path)
+            image_processor = MplugOwlImageProcessor.from_pretrained(self.checkpoint_path)
+            self.processor = MplugOwlProcessor(image_processor, self.tokenizer)
+            
+            self.model = MplugOwlForConditionalGeneration.from_pretrained(
+                self.checkpoint_path,
+                torch_dtype=torch.bfloat16,
+            ).to(self.device)
+            self.model.eval()
+            
+            self.softmax = nn.Softmax(dim=2)
+            self._initialized = True
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize VideoPhy model: {e}")
+    
+    def _get_entail_score(self, logits, input_ids):
+        """Extract entailment score from model logits."""
+        logits = self.softmax(logits)
+        token_id_yes = self.tokenizer.encode('Yes', add_special_tokens=False)[0]
+        token_id_no = self.tokenizer.encode('No', add_special_tokens=False)[0]
+        
+        entailment = []
+        for j in range(len(logits)):
+            for i in range(len(input_ids[j])):
+                if input_ids[j][i] == self.tokenizer.pad_token_id:
+                    i = i - 1
+                    break
+                elif i == len(input_ids[j]) - 1:
+                    break
+            score = logits[j][i][token_id_yes] / (logits[j][i][token_id_yes] + logits[j][i][token_id_no])
+            entailment.append(score)
+        return torch.stack(entailment)
+    
+    def compute_sa(self, video_path: str, caption: str) -> float:
+        """Compute Semantic Adherence (SA) score.
+        
+        Args:
+            video_path: Path to video file
+            caption: Text caption describing the video
+        
+        Returns:
+            SA score between 0 and 1 (higher is better)
+        """
+        self._initialize()
+        
+        # Prepare prompt
+        prompt = f'''
+        The following is a conversation between a curious human and AI assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.
+        Human: <|video|>
+        Human: Does this video entail the description: "{caption}"?
+        AI: 
+        '''
+        
+        # Create temporary CSV for dataset
+        import tempfile
+        import pandas as pd
+        import csv
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            writer = csv.writer(f)
+            writer.writerow(['videopath', 'caption'])
+            writer.writerow([video_path, prompt])
+            temp_csv = f.name
+        
+        try:
+            from data_utils.xgpt3_dataset import MultiModalDataset
+            from utils import batchify
+            from torch.utils.data import DataLoader
+            
+            dataset = MultiModalDataset(temp_csv, self.tokenizer, self.processor, max_length=256, loss_objective='sequential')
+            dataloader = DataLoader(dataset, batch_size=1, pin_memory=True, collate_fn=batchify)
+            
             with torch.no_grad():
-                f12 = model(to_tensor_np(im1), to_tensor_np(im2))[0].cpu().numpy().transpose(1,2,0)
-                f23 = model(to_tensor_np(im2), to_tensor_np(im3))[0].cpu().numpy().transpose(1,2,0)
-        else:
-            f12 = cv2.calcOpticalFlowFarneback(gray1, gray2, None,
-                                              pyr_scale=0.5, levels=3, winsize=15, iterations=3,
-                                              poly_n=5, poly_sigma=1.2, flags=0)
-            f23 = cv2.calcOpticalFlowFarneback(gray2, gray3, None,
-                                              pyr_scale=0.5, levels=3, winsize=15, iterations=3,
-                                              poly_n=5, poly_sigma=1.2, flags=0)
+                for inputs in dataloader:
+                    for k, v in inputs.items():
+                        if torch.is_tensor(v):
+                            if v.dtype == torch.float:
+                                inputs[k] = v.bfloat16()
+                            inputs[k] = inputs[k].to(self.device)
+                    
+                    outputs = self.model(
+                        pixel_values=inputs['pixel_values'],
+                        video_pixel_values=inputs['video_pixel_values'],
+                        labels=None,
+                        num_images=inputs['num_images'],
+                        num_videos=inputs['num_videos'],
+                        input_ids=inputs['input_ids'],
+                        non_padding_mask=inputs['non_padding_mask'],
+                        non_media_mask=inputs['non_media_mask'],
+                        prompt_mask=inputs['prompt_mask']
+                    )
+                    logits = outputs['logits']
+                    entail_scores = self._get_entail_score(logits, inputs['input_ids'])
+                    return entail_scores[0].item()
+        finally:
+            os.unlink(temp_csv)
+    
+    def compute_pc(self, video_path: str) -> float:
+        """Compute Physical Commonsense (PC) score.
+        
+        Args:
+            video_path: Path to video file
+        
+        Returns:
+            PC score between 0 and 1 (higher is better)
+        """
+        self._initialize()
+        
+        # Prepare prompt
+        prompt = '''
+            The following is a conversation between a curious human and AI assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.
+            Human: <|video|>
+            Human: Does this video follow the physical laws?
+            AI: 
+        '''
+        
+        # Create temporary CSV for dataset
+        import tempfile
+        import csv
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            writer = csv.writer(f)
+            writer.writerow(['videopath', 'caption'])
+            writer.writerow([video_path, prompt])
+            temp_csv = f.name
+        
+        try:
+            from data_utils.xgpt3_dataset import MultiModalDataset
+            from utils import batchify
+            from torch.utils.data import DataLoader
+            
+            dataset = MultiModalDataset(temp_csv, self.tokenizer, self.processor, max_length=256, loss_objective='sequential')
+            dataloader = DataLoader(dataset, batch_size=1, pin_memory=True, collate_fn=batchify)
+            
+            with torch.no_grad():
+                for inputs in dataloader:
+                    for k, v in inputs.items():
+                        if torch.is_tensor(v):
+                            if v.dtype == torch.float:
+                                inputs[k] = v.bfloat16()
+                            inputs[k] = inputs[k].to(self.device)
+                    
+                    outputs = self.model(
+                        pixel_values=inputs['pixel_values'],
+                        video_pixel_values=inputs['video_pixel_values'],
+                        labels=None,
+                        num_images=inputs['num_images'],
+                        num_videos=inputs['num_videos'],
+                        input_ids=inputs['input_ids'],
+                        non_padding_mask=inputs['non_padding_mask'],
+                        non_media_mask=inputs['non_media_mask'],
+                        prompt_mask=inputs['prompt_mask']
+                    )
+                    logits = outputs['logits']
+                    entail_scores = self._get_entail_score(logits, inputs['input_ids'])
+                    return entail_scores[0].item()
+        finally:
+            os.unlink(temp_csv)
 
-        # warp f23 backwards to coords of f12 using coords after applying f12
-        h,w = f12.shape[:2]
-        grid_y, grid_x = np.mgrid[0:h, 0:w]
-        x_fw = grid_x + f12[...,0]
-        y_fw = grid_y + f12[...,1]
-        # sample f23 at (y_fw, x_fw)
-        xq = np.clip(x_fw, 0, w-1)
-        yq = np.clip(y_fw, 0, h-1)
-        # bilinear sampling
-        def bilinear_sample(flow, xq, yq):
-            x0 = np.floor(xq).astype(int); x1 = np.clip(x0+1, 0, w-1)
-            y0 = np.floor(yq).astype(int); y1 = np.clip(y0+1, 0, h-1)
-            wa = (x1 - xq)*(y1 - yq)
-            wb = (xq - x0)*(y1 - yq)
-            wc = (x1 - xq)*(yq - y0)
-            wd = (xq - x0)*(yq - y0)
-            Ia = flow[y0, x0]; Ib = flow[y0, x1]; Ic = flow[y1, x0]; Id = flow[y1, x1]
-            return (Ia*wa[...,None] + Ib*wb[...,None] + Ic*wc[...,None] + Id*wd[...,None])
 
-        f23_warp = bilinear_sample(f23, xq, yq)
-        # forward-backward residual
-        res = f12 + f23_warp  # shape H,W,2
-        mag = np.linalg.norm(res, axis=2)
-        # occlusion heuristic: if ||f12|| + ||f23|| small or change too big, mark occluded (optionally)
-        occl_mask = (np.linalg.norm(f12, axis=2) + np.linalg.norm(f23_warp, axis=2)) > 1e-3
-        # compute mean over non-occluded pixels
-        if occl_mask.sum() > 0:
-            mean_err = mag[occl_mask].mean()
-        else:
-            mean_err = mag.mean()
-        fb_errors.append(mean_err)
-    return float(np.mean(fb_errors)) if fb_errors else 0.0
-
-# -------------------------
-# 4) VideoCLIP Score (video-text cosine)
-# -------------------------
-# This assumes you have a pretrained VideoCLIP model (video encoder + CLIP text encoder).
-# Many repos provide a checkpoint; load the model and compute:
-# video_embedding = video_encoder(frames)  # global pooled
-# text_embedding = clip_text_encoder(prompt)
-# score = cosine(video_embedding, text_embedding)
-def compute_videoclip_score_clip(frames: List[np.ndarray], text: str, clip_model, clip_processor, frame_resize=(224,224)):
+class VideoPhy2Evaluator:
+    """VideoPhy-2 evaluator for SA and PC scores.
+    
+    Uses generation-based inference that outputs scores 1-5.
+    Requires checkpoint from: https://huggingface.co/videophysics/videophy_2_auto
     """
-    If you don't have VideoCLIP, you can approximate with CLIP image encoder + average pooling across frames (not exact VideoCLIP).
-    This function implements the CLIP-approximation which is a practical baseline.
-    For research-grade VideoCLIP, replace this with official VideoCLIP model inference.
-    """
-    # frames: list of HWC RGB uint8
-    # clip_model: huggingface CLIPModel
-    # clip_processor: huggingface CLIPProcessor
-    from transformers import CLIPProcessor, CLIPModel
-    # Preprocess each frame with clip_processor
-    imgs = [Image.fromarray(f) for f in frames]
-    inputs = clip_processor(images=imgs, return_tensors="pt", padding=True).to(device)
-    with torch.no_grad():
-        img_feats = clip_model.get_image_features(**inputs)  # [T, dim]
-        vid_feat = img_feats.mean(dim=0, keepdim=True)  # [1, dim]
-        txt_inputs = clip_processor(text=[text], return_tensors="pt", padding=True).to(device)
-        txt_feat = clip_model.get_text_features(**txt_inputs)  # [1, dim]
-        vid_feat = F.normalize(vid_feat, dim=-1)
-        txt_feat = F.normalize(txt_feat, dim=-1)
-        sim = torch.matmul(vid_feat, txt_feat.t()).item()
-    return float(sim)
+    
+    def __init__(self, checkpoint_path: str, device: str = 'cuda', num_frames: int = 32):
+        """Initialize VideoPhy-2 evaluator.
+        
+        Args:
+            checkpoint_path: Path to VideoPhy-2 checkpoint directory
+            device: Device to run computation on
+            num_frames: Number of frames to extract from video
+        """
+        self.checkpoint_path = checkpoint_path
+        self.device = device
+        self.num_frames = num_frames
+        self.model = None
+        self.tokenizer = None
+        self.processor = None
+        self._initialized = False
+        
+        self.generate_kwargs = {
+            'do_sample': False,
+            'top_k': 1,
+            'temperature': 0.001,
+            'max_length': 256,
+        }
+        
+        self.num_map = {
+            "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5
+        }
+    
+    def _initialize(self):
+        """Lazy initialization of model components."""
+        if self._initialized:
+            return
+        
+        try:
+            import sys
+            import os
+            # Add VideoPhy2 paths to sys.path
+            videophy2_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'VideoPhy', 'VIDEOPHY2'
+            )
+            if videophy2_path not in sys.path:
+                sys.path.insert(0, videophy2_path)
+            
+            from transformers.models.llama.tokenization_llama import LlamaTokenizer
+            from mplug_owl_video.modeling_mplug_owl import MplugOwlForConditionalGeneration
+            from mplug_owl_video.processing_mplug_owl import MplugOwlImageProcessor, MplugOwlProcessor
+            from template import PROMPT_SA, PROMPT_PHYSICS
+            
+            self.PROMPT_SA = PROMPT_SA
+            self.PROMPT_PHYSICS = PROMPT_PHYSICS
+            
+            self.tokenizer = LlamaTokenizer.from_pretrained(self.checkpoint_path)
+            image_processor = MplugOwlImageProcessor.from_pretrained(self.checkpoint_path)
+            self.processor = MplugOwlProcessor(image_processor, self.tokenizer)
+            
+            self.model = MplugOwlForConditionalGeneration.from_pretrained(
+                self.checkpoint_path,
+                torch_dtype=torch.bfloat16,
+                device_map={'': 'cpu'}
+            )
+            self.model.eval()
+            self.model = self.model.to(self.device).to(torch.bfloat16)
+            
+            self._initialized = True
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize VideoPhy-2 model: {e}")
+    
+    def _parse_score(self, output: str) -> int:
+        """Parse score from model output."""
+        output_lower = output.lower().strip()
+        
+        for key, val in self.num_map.items():
+            if key in output_lower:
+                return val
+        
+        # Try to extract digit
+        digits = ''.join([c for c in output_lower if c.isdigit()])
+        if digits and int(digits) in self.num_map.values():
+            return int(digits)
+        
+        return 0  # Default to 0 if parsing fails
+    
+    def compute_sa(self, video_path: str, caption: str) -> int:
+        """Compute Semantic Adherence (SA) score.
+        
+        Args:
+            video_path: Path to video file
+            caption: Text caption describing the video
+        
+        Returns:
+            SA score between 1 and 5 (higher is better)
+        """
+        self._initialize()
+        
+        prompt = self.PROMPT_SA.format(caption=caption)
+        
+        with torch.no_grad():
+            inputs = self.processor(
+                text=[prompt],
+                videos=[video_path],
+                num_frames=self.num_frames,
+                return_tensors='pt'
+            )
+            inputs = {k: v.bfloat16() if v.dtype == torch.float else v for k, v in inputs.items()}
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            res = self.model.generate(**inputs, **self.generate_kwargs)
+            output = self.tokenizer.decode(res.tolist()[0], skip_special_tokens=True)
+            
+            return self._parse_score(output)
+    
+    def compute_pc(self, video_path: str) -> int:
+        """Compute Physical Commonsense (PC) score.
+        
+        Args:
+            video_path: Path to video file
+        
+        Returns:
+            PC score between 1 and 5 (higher is better)
+        """
+        self._initialize()
+        
+        prompt = self.PROMPT_PHYSICS
+        
+        with torch.no_grad():
+            inputs = self.processor(
+                text=[prompt],
+                videos=[video_path],
+                num_frames=self.num_frames,
+                return_tensors='pt'
+            )
+            inputs = {k: v.bfloat16() if v.dtype == torch.float else v for k, v in inputs.items()}
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            res = self.model.generate(**inputs, **self.generate_kwargs)
+            output = self.tokenizer.decode(res.tolist()[0], skip_special_tokens=True)
+            
+            return self._parse_score(output)
 
-# -------------------------
-# 5) Action Accuracy (Kinetics classifier)
-# -------------------------
-# We'll use PyTorchVideo hub model (e.g., slow_r50) for inference.
-def compute_action_label_pytorchvideo(frames: List[np.ndarray], model_name="slow_r50", frames_per_clip=16):
-    """
-    frames: list of RGB HWC uint8
-    model_name: 'slow_r50' or 'x3d_s' etc (available via pytorchvideo.models.hub)
-    returns: predicted class index (int) and topk logits if needed
-    """
-    from pytorchvideo.models.hub import slow_r50, x3d_s
-    if model_name == "slow_r50":
-        m = slow_r50(pretrained=True).to(device).eval()
-    elif model_name == "x3d_s":
-        m = x3d_s(pretrained=True).to(device).eval()
-    else:
-        m = slow_r50(pretrained=True).to(device).eval()
-
-    # sample a clip of frames_per_clip uniformly
-    n = len(frames)
-    idx = np.linspace(0, n-1, frames_per_clip).astype(int).tolist()
-    clip = [frames[i] for i in idx]  # list of HWC
-    # preprocess to tensor [B=1, C, T, H, W]
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((256,256)),
-        transforms.CenterCrop((224,224)),
-        transforms.ToTensor(),
-    ])
-    clip_t = torch.stack([transform(f).to(device) for f in clip], dim=1).unsqueeze(0)  # [1, C, T, H, W]
-    with torch.no_grad():
-        out = m(clip_t)
-        probs = F.softmax(out, dim=-1)
-        top1 = int(probs.argmax(dim=-1).item())
-    return top1, probs.cpu().numpy()
-
-# -------------------------
-# 6) SSIM (frame-level averaged)
-# -------------------------
-def compute_ssim_avg(frames: List[np.ndarray]):
-    """
-    frames: list of RGB HWC uint8
-    returns: mean SSIM across consecutive frames (per-channel averaged)
-    """
-    vals = []
-    for i in range(len(frames)-1):
-        a = frames[i]
-        b = frames[i+1]
-        # skimage expects grayscale or multichannel; specify multichannel=True
-        s = ssim_sk(a, b, data_range=255, multichannel=True)
-        vals.append(s)
-    return float(np.mean(vals)) if vals else 1.0
-
-# -------------------------
-# Example runner: single video metrics
-# -------------------------
-if __name__ == "__main__":
-    import argparse, json
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--video", type=str, help="path to video")
-    parser.add_argument("--prompt", type=str, default="A scene", help="text prompt for VideoCLIP")
-    parser.add_argument("--raft_repo", type=str, default=None, help="path to RAFT repo")
-    parser.add_argument("--raft_ckpt", type=str, default=None, help="path to RAFT checkpoint")
-    parser.add_argument("--fvd_repo", type=str, default=None, help="path to frechet_video_distance repo")
-    parser.add_argument("--i3d_ckpt", type=str, default=None, help="path to I3D checkpoint for FVD")
-    args = parser.parse_args()
-
-    frames = read_video_frames(args.video, resize=(256,256))
-    print("frames:", len(frames))
-
-    print("Computing t-LPIPS...")
-    t_lpips = compute_t_lpips(frames, resize=(256,256))
-
-    print("Computing SSIM...")
-    ssim_v = compute_ssim_avg(frames)
-
-    print("Computing Optical Flow Consistency (RAFT or Farneback)...")
-    flow_cons = compute_flow_consistency_raft(frames, args.raft_repo or "", args.raft_ckpt or "")
-
-    print("Computing VideoCLIP (CLIP-approx)...")
-    # lightweight CLIP baseline for VideoCLIP — you should replace with true VideoCLIP for strict paper numbers
-    try:
-        from transformers import CLIPProcessor, CLIPModel
-        clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
-        clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-        vclip = compute_videoclip_score_clip(frames, args.prompt, clip_model, clip_processor)
-    except Exception as e:
-        print("CLIP load error:", e)
-        vclip = None
-
-    print("Computing Action label (pytorchvideo slow_r50)...")
-    action_label, probs = compute_action_label_pytorchvideo(frames, model_name="slow_r50")
-
-    out = {
-        "t-LPIPS": t_lpips,
-        "SSIM": ssim_v,
-        "OpticalFlowConsistency": flow_cons,
-        "VideoCLIP_score": vclip,
-        "Action_label_top1": int(action_label),
-    }
-    print(json.dumps(out, indent=2))
