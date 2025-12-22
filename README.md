@@ -19,7 +19,7 @@ PhysVideoGenerator is a research framework for generating physics-aware videos f
 - **Physics-Informed Generation**: Videos that respect physical constraints and dynamics
 - **Text-to-Video Synthesis**: Generate videos from natural language descriptions
 - **Flexible Architecture**: Modular design with separate encoder, decoder, and transformer components
-- **Comprehensive Evaluation**: Built-in metrics for assessing video quality and physical accuracy
+- **Comprehensive Evaluation**: Metrics for assessing video quality and physical accuracy
 - **GPU-Accelerated**: Optimized for CUDA-enabled GPUs with mixed precision training
 - **Streaming Dataset Support**: Memory-efficient data loading for large video datasets
 
