@@ -81,6 +81,7 @@ def train_with_predictor(
     output_dir: str = "./latte_predictor_checkpoints",
     num_epochs: int = 3,
     batch_size: int = 1,
+    gradient_accumulation_steps: int = 1,
     learning_rate: float = 1e-5,
     vjepa_loss_weight: float = 1.0,  # Weight for VJEPA prediction loss
     mixed_precision: str = "bf16",
@@ -89,8 +90,9 @@ def train_with_predictor(
     """
     Joint training of PredictorP + temporal cross-attention layers.
     """
-    
-    accelerator = Accelerator(mixed_precision=mixed_precision)
+
+    accelerator = Accelerator(mixed_precision=mixed_precision,
+                              gradient_accumulation_steps=gradient_accumulation_steps)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -364,6 +366,9 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="./latte_predictor_checkpoints")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                        help="Accumulate gradients over N steps. Effective batch = batch_size * gradient_accumulation_steps")
+
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--vjepa_weight", type=float, default=1.0, help="VJEPA loss weight")
     parser.add_argument("--num_samples", type=int, default=None)
@@ -376,6 +381,7 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         num_epochs=args.epochs,
         batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.lr,
         vjepa_loss_weight=args.vjepa_weight,
         num_train_samples=args.num_samples,

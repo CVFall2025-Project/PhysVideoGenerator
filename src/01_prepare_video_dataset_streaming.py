@@ -40,6 +40,7 @@ from src.datasets import clean_videos
 from src.encoders.vae_encoder_decoder import VAEEncoder
 from src.encoders.vjepa2_encoder import VJEPA2Encoder
 from src.encoders.text_caption_enocder import TextEncoder
+import random
 
 logger = logging.getLogger("prepare_video_dataset_streaming")
 
@@ -136,9 +137,11 @@ def run_streaming_pipeline(
         logger.error(f"Raw videos directory not found: {paths['raw_videos']}. Place videos there or run downloader first.")
         return {}
 
-    video_files = sorted([
+    video_files = [
         f for f in os.listdir(paths["raw_videos"]) if f.lower().endswith((".mp4"))
-    ])
+    ]
+    
+    random.shuffle(video_files)
 
     shortlisted_videos = []
     cnt = 0
