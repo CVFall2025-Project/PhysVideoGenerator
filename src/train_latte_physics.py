@@ -86,6 +86,7 @@ def train_with_predictor(
     vjepa_loss_weight: float = 1.0,  # Weight for VJEPA prediction loss
     mixed_precision: str = "bf16",
     num_train_samples: int = None,
+    resume_from_checkpoint: str = None,
 ):
     """
     Joint training of PredictorP + temporal cross-attention layers.
@@ -248,14 +249,62 @@ def train_with_predictor(
         weight_decay=0.01,
     )
     
+    start_epoch = 0
+    global_step_offset = 0
+
+    # Resume from checkpoint if provided
+    if resume_from_checkpoint:
+        checkpoint_path = Path(resume_from_checkpoint)
+        if checkpoint_path.is_dir():
+            checkpoints = sorted(checkpoint_path.glob("checkpoint_epoch_*.pt"))
+            if checkpoints:
+                latest_checkpoint = checkpoints[-1]
+                print(f"\n{'='*60}")
+                print(f"RESUMING FROM CHECKPOINT")
+                print(f"{'='*60}")
+                print(f"Checkpoint: {latest_checkpoint}")
+
+                checkpoint = torch.load(latest_checkpoint, map_location='cpu')
+
+                # Load model state
+                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                start_epoch = checkpoint['epoch']
+                global_step_offset = checkpoint.get('global_step', 0)
+
+                print(f"✓ Loaded checkpoint from epoch {start_epoch}")
+                print(f"✓ Resuming training from epoch {start_epoch + 1}")
+                print(f"✓ Global step: {global_step_offset}")
+                print(f"{'='*60}\n")
+            else:
+                print(f"No checkpoints found in {checkpoint_path}")
+        elif checkpoint_path.is_file():
+            print(f"\n{'='*60}")
+            print(f"RESUMING FROM CHECKPOINT FILE")
+            print(f"{'='*60}")
+            print(f"Checkpoint: {checkpoint_path}") 
+
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch']
+            global_step_offset = checkpoint.get('global_step', 0)
+
+            print(f"✓ Loaded checkpoint from epoch {start_epoch}")
+            print(f"✓ Resuming training from epoch {start_epoch + 1}")
+            print(f"✓ Global step: {global_step_offset}")
+            print(f"{'='*60}\n")
+        else:
+            print(f"Checkpoint file not found: {checkpoint_path}")
+
     # Prepare for distributed training
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
-    
+
     # Training loop
-    print(f"Starting training for {num_epochs} epochs...\n")
-    global_step = 0
-    
-    for epoch in range(num_epochs):
+    print(f"Starting training from epoch {start_epoch + 1} to {num_epochs}...\n")
+    global_step = global_step_offset
+
+    for epoch in range(start_epoch, num_epochs):
         model.train()
         epoch_loss = 0.0
         epoch_noise_loss = 0.0
@@ -373,6 +422,7 @@ if __name__ == "__main__":
     parser.add_argument("--vjepa_weight", type=float, default=1.0, help="VJEPA loss weight")
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--mixed_precision", type=str, default="bf16")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     
     args = parser.parse_args()
     
@@ -386,4 +436,5 @@ if __name__ == "__main__":
         vjepa_loss_weight=args.vjepa_weight,
         num_train_samples=args.num_samples,
         mixed_precision=args.mixed_precision,
+        resume_from_checkpoint=args.resume_from_checkpoint
     )
