@@ -240,7 +240,14 @@ def build_index(paths: Dict[str, str]) -> None:
     """Build index file for processed videos."""
     logger.info("Building indexed dataset")
     index_file = paths["index_file"]
+
+    csv_path = os.path.join(paths["csv_data"], "OpenVid-1M.csv")
+    if not os.path.exists(csv_path):
+        logger.warning(f"CSV not found: {csv_path}. Skipping text encoding.")
+        return {}
     
+    csv_df = pd.read_csv(csv_path)
+
     encoded_video_path_list = os.listdir(paths["encoded_vae"])
     video_ids = set([fname[:-8] for fname in encoded_video_path_list])
     
@@ -249,6 +256,8 @@ def build_index(paths: Dict[str, str]) -> None:
         vae_file = os.path.join(paths["encoded_vae"], f"{video_id}_vae.npz")
         vjepa_file = os.path.join(paths["encoded_vjepa"], f"{video_id}_vjepa.npz")
         text_file = os.path.join(paths["encoded_text"], f"{video_id}_text.npy")
+        text_prompt = csv_df[csv_df["video"]==f"{video_id}.mp4"]["caption"].values[0]
+        original_video_file = os.path.join(paths["raw_videos"], f"{video_id}.mp4")
         
         # Only add if files exist
         if not os.path.exists(vae_file):
@@ -263,6 +272,8 @@ def build_index(paths: Dict[str, str]) -> None:
             "vae": vae_file,
             "vjepa": vjepa_file,
             "text": text_file,
+            "text_prompt": text_prompt,
+            "original_video": original_video_file,
         }
         json_entries.append(entry)
     
