@@ -210,7 +210,6 @@ def batch_generate(
     print(f"\nLoading VAE decoder...")
     vae = VAEEncoder(
         model_name="maxin-cn/Latte-1",
-        subfolder="vae",
         device=device,
         torch_dtype=torch.bfloat16
     )
