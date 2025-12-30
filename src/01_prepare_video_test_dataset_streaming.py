@@ -49,13 +49,13 @@ def ensure_dirs(root: str) -> Dict[str, str]:
     project_root = os.path.abspath(root)
     paths = {
         "project_root": project_root,
-        "zip_folder": os.path.join(project_root, "data", "download"),
-        "raw_videos": os.path.join(project_root, "data", "raw_videos"),
-        "encoded_vae": os.path.join(project_root, "data", "encoded_videos", "vae"),
-        "encoded_vjepa": os.path.join(project_root, "data", "encoded_videos", "vjepa"),
-        "encoded_text": os.path.join(project_root, "data", "encoded_videos", "text"),
-        "csv_data": os.path.join(project_root, "data", "text_csv"),
-        "index_file": os.path.join(project_root, "data", "indexed_dataset.json"),
+        "zip_folder": os.path.join(project_root, "test_data", "download"),
+        "raw_videos": os.path.join(project_root, "test_data", "raw_videos"),
+        "encoded_vae": os.path.join(project_root, "test_data", "encoded_videos", "vae"),
+        "encoded_vjepa": os.path.join(project_root, "test_data", "encoded_videos", "vjepa"),
+        "encoded_text": os.path.join(project_root, "test_data", "encoded_videos", "text"),
+        "csv_data": os.path.join(project_root, "test_data", "text_csv"),
+        "index_file": os.path.join(project_root, "test_data", "indexed_dataset.json"),
     }
     for p in paths.values():
         if p != paths["index_file"]:
@@ -149,7 +149,7 @@ def run_streaming_pipeline(
         if cnt > limit:
             break
         duration = csv_df[csv_df["video"]==file_name]["seconds"].values[0]
-        if duration<=4.0:
+        if duration>=4.0 and duration<=5.0:
             shortlisted_videos.append(file_name)
             cnt+=1
     
@@ -174,9 +174,13 @@ def run_streaming_pipeline(
                 paths,
             )
 
-        # Delete raw video immediately after processing
-        delete_command = "rm -rf " + paths["raw_videos"] + "/*.mp4"
-        os.system(delete_command)
+        # Delete all raw video immediately after processing except shortlisted ones
+        for video_file in os.listdir(paths["raw_videos"]):
+            if video_file not in shortlisted_videos:
+                file_path = os.path.join(paths["raw_videos"], video_file)
+                if os.path.isfile(file_path):
+                    delete_command = "rm -rf " + paths["raw_videos"] + "/" + video_file
+                    os.system(delete_command)
         
         logger.info(f"\n{'='*60}")
         logger.info(f"Streaming encoding complete. Processed {len(shortlisted_videos)} videos total.")
@@ -236,7 +240,14 @@ def build_index(paths: Dict[str, str]) -> None:
     """Build index file for processed videos."""
     logger.info("Building indexed dataset")
     index_file = paths["index_file"]
+
+    csv_path = os.path.join(paths["csv_data"], "OpenVid-1M.csv")
+    if not os.path.exists(csv_path):
+        logger.warning(f"CSV not found: {csv_path}. Skipping text encoding.")
+        return {}
     
+    csv_df = pd.read_csv(csv_path)
+
     encoded_video_path_list = os.listdir(paths["encoded_vae"])
     video_ids = set([fname[:-8] for fname in encoded_video_path_list])
     
@@ -245,6 +256,8 @@ def build_index(paths: Dict[str, str]) -> None:
         vae_file = os.path.join(paths["encoded_vae"], f"{video_id}_vae.npz")
         vjepa_file = os.path.join(paths["encoded_vjepa"], f"{video_id}_vjepa.npz")
         text_file = os.path.join(paths["encoded_text"], f"{video_id}_text.npy")
+        text_prompt = csv_df[csv_df["video"]==f"{video_id}.mp4"]["caption"].values[0]
+        original_video_file = os.path.join(paths["raw_videos"], f"{video_id}.mp4")
         
         # Only add if files exist
         if not os.path.exists(vae_file):
@@ -259,6 +272,8 @@ def build_index(paths: Dict[str, str]) -> None:
             "vae": vae_file,
             "vjepa": vjepa_file,
             "text": text_file,
+            "text_prompt": text_prompt,
+            "original_video": original_video_file,
         }
         json_entries.append(entry)
     
