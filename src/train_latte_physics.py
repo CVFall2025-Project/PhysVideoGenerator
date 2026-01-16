@@ -81,16 +81,19 @@ def train_with_predictor(
     output_dir: str = "./latte_predictor_checkpoints",
     num_epochs: int = 3,
     batch_size: int = 1,
+    gradient_accumulation_steps: int = 1,
     learning_rate: float = 1e-5,
     vjepa_loss_weight: float = 1.0,  # Weight for VJEPA prediction loss
     mixed_precision: str = "bf16",
     num_train_samples: int = None,
+    resume_from_checkpoint: str = None,
 ):
     """
     Joint training of PredictorP + temporal cross-attention layers.
     """
-    
-    accelerator = Accelerator(mixed_precision=mixed_precision)
+
+    accelerator = Accelerator(mixed_precision=mixed_precision,
+                              gradient_accumulation_steps=gradient_accumulation_steps)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -246,14 +249,86 @@ def train_with_predictor(
         weight_decay=0.01,
     )
     
+    start_epoch = 0
+    global_step_offset = 0
+    checkpoint_to_load = None
+
+    # Resume from checkpoint if provided
+    if resume_from_checkpoint:
+        checkpoint_path = Path(resume_from_checkpoint)
+        if checkpoint_path.is_dir():
+            checkpoints = sorted(checkpoint_path.glob("checkpoint_epoch_*.pt"))
+            if checkpoints:
+                checkpoint_to_load = checkpoints[-1]
+                print(f"\n{'='*60}")
+                print(f"RESUMING FROM CHECKPOINT")
+                print(f"{'='*60}")
+                print(f"Checkpoint: {checkpoint_to_load}")
+                print(f"{'='*60}\n")
+            else:
+                print(f"No checkpoints found in {checkpoint_path}")
+        elif checkpoint_path.is_file():
+            checkpoint_to_load = checkpoint_path
+            print(f"\n{'='*60}")
+            print(f"RESUMING FROM CHECKPOINT FILE")
+            print(f"{'='*60}")
+            print(f"Checkpoint: {checkpoint_to_load}") 
+        else:
+            print(f"Checkpoint file not found: {checkpoint_path}")
+
     # Prepare for distributed training
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
-    
+
+    if checkpoint_to_load is not None:
+        print(f"Loading checkpoint from {checkpoint_to_load}...")
+        checkpoint = torch.load(checkpoint_to_load, map_location="cpu")
+        
+        # Load model state
+        unwrapped_model = accelerator.unwrap_model(model)
+
+        try:
+            unwrapped_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            print("✓ Model state loaded successfully")
+        except Exception as e:
+            print(f"Warning loading model state: {e}")
+            print("Attempting to load with key filtering...")
+
+            model_state = unwrapped_model.state_dict()
+            checkpoint_state = checkpoint['model_state_dict']
+
+            filtered_state = {}
+            for key in checkpoint_state:
+                if key in model_state:
+                    if checkpoint_state[key].shape == model_state[key].shape:
+                        filtered_state[key] = checkpoint_state[key]
+                    else:
+                        print(f"  Skipping {key}: shape mismatch {checkpoint_state[key].shape} vs {model_state[key].shape}")
+                else:
+                    print(f"  Skipping {key}: not in current model")
+            
+            unwrapped_model.load_state_dict(filtered_state, strict=False)
+            print(f"✓ Loaded {len(filtered_state)}/{len(checkpoint_state)} matching parameters")
+        
+        # Load optimizer state
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            print("✓ Optimizer state loaded successfully")
+        except Exception as e:
+            print(f"Warning loading optimizer state: {e}")
+            print("Continuing with fresh optimizer state...")
+
+
+        start_epoch = checkpoint['epoch']
+        global_step_offset = checkpoint.get('global_step', 0)
+
+        print(f"✓ Resuming from epoch {start_epoch + 1}")
+        print(f"✓ Global step: {global_step_offset}\n")
+
     # Training loop
-    print(f"Starting training for {num_epochs} epochs...\n")
-    global_step = 0
-    
-    for epoch in range(num_epochs):
+    print(f"Starting training from epoch {start_epoch + 1} to {num_epochs}...\n")
+    global_step = global_step_offset
+
+    for epoch in range(start_epoch, num_epochs):
         model.train()
         epoch_loss = 0.0
         epoch_noise_loss = 0.0
@@ -364,10 +439,14 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="./latte_predictor_checkpoints")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                        help="Accumulate gradients over N steps. Effective batch = batch_size * gradient_accumulation_steps")
+
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--vjepa_weight", type=float, default=1.0, help="VJEPA loss weight")
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--mixed_precision", type=str, default="bf16")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     
     args = parser.parse_args()
     
@@ -376,8 +455,10 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         num_epochs=args.epochs,
         batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.lr,
         vjepa_loss_weight=args.vjepa_weight,
         num_train_samples=args.num_samples,
         mixed_precision=args.mixed_precision,
+        resume_from_checkpoint=args.resume_from_checkpoint
     )
