@@ -2,9 +2,7 @@
 
 A physics-aware video generation framework leveraging Latte Transformer with physics-informed training.
 
-```markdown
-[![arXiv](https://img.shields.io/badge/arXiv-2401.12345-b31b1b.svg)](https://arxiv.org/abs/2601.03665v1)
-```
+[![arXiv](https://img.shields.io/badge/arXiv-2601.03665-b31b1b.svg)](https://arxiv.org/abs/2601.03665v1)
 
 ## Overview
 
