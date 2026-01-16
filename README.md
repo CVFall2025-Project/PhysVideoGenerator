@@ -2,6 +2,10 @@
 
 A physics-aware video generation framework leveraging Latte Transformer with physics-informed training.
 
+```markdown
+[![arXiv](https://img.shields.io/badge/arXiv-2401.12345-b31b1b.svg)](https://arxiv.org/abs/2601.03665v1)
+```
+
 ## Overview
 
 PhysVideoGenerator is a research framework for generating physics-aware videos from text descriptions. The system extends the Latte (Latent Diffusion Transformer) architecture with physics-aware modifications to ensure generated videos follow physical laws and dynamics.
