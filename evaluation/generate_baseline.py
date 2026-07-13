@@ -98,11 +98,14 @@ def generate(args: argparse.Namespace) -> None:
     pipe = LattePipeline.from_pretrained(MODEL_ID, torch_dtype=torch.float16)
 
     if args.sequential_offload:
-        # Moves each submodule to GPU only when needed — fits 24 GB GPUs
+        # Layer-by-layer offload — slowest but lowest peak VRAM (~8 GB)
         pipe.enable_sequential_cpu_offload()
         print("Sequential CPU offload enabled.")
     else:
-        pipe = pipe.to(device)
+        # Model-level offload: moves text encoder / transformer / VAE to GPU
+        # only when active, then back to CPU. Safe default on A100.
+        pipe.enable_model_cpu_offload()
+        print("Model CPU offload enabled.")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
