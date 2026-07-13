@@ -2,18 +2,26 @@
 
 Iterate OpenVid-1M parts on HuggingFace, stream-extract only the videos listed
 in the curated CSV via HTTP range requests, VAE+VJEPA encode each one, and
-delete the mp4 immediately. Text encoding happens once at the end for every
-video that made it through. Idempotent: safe to re-run to pick up where a
-previous run left off.
+delete the mp4 immediately. Text encoding is decoupled — it works straight from
+the curated CSV's caption column and can be run before, during, or after video
+prep. Idempotent throughout: safe to re-run to pick up where a previous run
+left off.
 
 Requires:
     pip install remotezip
 
 Usage:
-    python src/iterative_encode_curated.py                       # all 187 parts
+    # Recommended: text-encode all captions first (cheap, doesn't need videos),
+    # then run video encoding without T5 loaded.
+    python src/iterative_encode_curated.py --only_text
+    python src/iterative_encode_curated.py --skip_text
+
+    # Or everything in one shot
+    python src/iterative_encode_curated.py
+
+    # Range of parts / index-only helpers
     python src/iterative_encode_curated.py --start_part 5 --end_part 20
-    python src/iterative_encode_curated.py --skip_text           # defer text encoding
-    python src/iterative_encode_curated.py --only_index          # rebuild the index only
+    python src/iterative_encode_curated.py --only_index
 """
 from __future__ import annotations
 
@@ -48,7 +56,6 @@ except ImportError:
 NUM_PARTS = 187
 BASE_URL = "https://huggingface.co/datasets/nkp37/OpenVid-1M/resolve/main"
 CURATED_CSV = "data/text_csv/curated_OpenVid-1M.csv"
-OPENVID_CSV = "data/text_csv/OpenVid-1M.csv"
 RAW_DIR = "data/raw_videos"
 ENCODED_ROOT = "data/encoded_videos"
 INDEX_FILE = "data/indexed_dataset.json"
@@ -81,12 +88,14 @@ def encode_video(video_path: str, video_id: str, vae, vjepa, processor) -> bool:
         frames = processor.load_video(video_path)
         outputs = processor.process_video(frames)
 
+        # Store as fp16 — VJEPA runs the model in fp32 by default so its output
+        # is fp32 (~10 MB compressed); training casts to bf16 anyway.
         vae_tensor = torch.from_numpy(outputs["vae"]).to(vae.device).to(vae.torch_dtype)
-        vae_encoded = vae.encode(vae_tensor).detach().cpu().numpy()
+        vae_encoded = vae.encode(vae_tensor).detach().cpu().numpy().astype(np.float16)
         np.savez_compressed(f"{ENCODED_ROOT}/vae/{video_id}_vae.npz", vae_encoded)
 
         vjepa_tensor = torch.from_numpy(outputs["vjepa"]).to(vjepa.device).to(vjepa.torch_dtype)
-        vjepa_encoded = vjepa.encode(vjepa_tensor).detach().cpu().numpy()
+        vjepa_encoded = vjepa.encode(vjepa_tensor).detach().cpu().numpy().astype(np.float16)
         np.savez_compressed(f"{ENCODED_ROOT}/vjepa/{video_id}_vjepa.npz", vjepa_encoded)
         return True
     except Exception as e:
@@ -153,24 +162,24 @@ def process_part(part_num: int, curated: set, vae, vjepa, processor, session) ->
 
 
 def batch_text_encode():
-    """Encode captions once, at the end, for every video that has VAE+VJEPA."""
+    """Text-encode every caption in the curated CSV. Independent of video
+    encoding: works from the CSV alone, so it can be run before, during, or
+    after video prep. Idempotent — skips captions already on disk."""
     print("\n=== Batch text encoding ===")
     text_dir = f"{ENCODED_ROOT}/text"
     os.makedirs(text_dir, exist_ok=True)
 
-    encoded_ids = {fn[:-8] for fn in os.listdir(f"{ENCODED_ROOT}/vae") if fn.endswith("_vae.npz")}
-    done_text = {fn[:-9] for fn in os.listdir(text_dir) if fn.endswith("_text.npy")}
-    todo_ids = encoded_ids - done_text
+    df = pd.read_csv(CURATED_CSV)
+    df["video_id"] = df["video"].str.replace(".mp4", "", regex=False)
 
-    if not todo_ids:
-        print("  All videos already have text embeddings.")
+    done_text = {fn[:-9] for fn in os.listdir(text_dir) if fn.endswith("_text.npy")}
+    df_todo = df[~df["video_id"].isin(done_text)]
+
+    if len(df_todo) == 0:
+        print("  All curated captions already encoded.")
         return
 
-    print(f"  {len(encoded_ids)} videos have VAE+VJEPA; {len(todo_ids)} need text.")
-
-    df = pd.read_csv(OPENVID_CSV)
-    df["video_id"] = df["video"].str.replace(".mp4", "", regex=False)
-    df_todo = df[df["video_id"].isin(todo_ids)]
+    print(f"  {len(df_todo)} of {len(df)} curated captions still need encoding.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     encoder = TextEncoder(model_name="google/t5-v1_1-xxl", device=device)
@@ -180,7 +189,7 @@ def batch_text_encode():
         try:
             emb = encoder.encode(row["caption"])
             arr = emb.detach().cpu().numpy() if hasattr(emb, "detach") else np.asarray(emb)
-            np.save(f"{text_dir}/{video_id}_text.npy", arr)
+            np.save(f"{text_dir}/{video_id}_text.npy", arr.astype(np.float16))
         except Exception as e:
             print(f"  ! text encode error for {video_id}: {e}", file=sys.stderr)
 
@@ -217,10 +226,17 @@ def main():
     parser.add_argument("--start_part", type=int, default=0)
     parser.add_argument("--end_part", type=int, default=NUM_PARTS)
     parser.add_argument("--skip_text", action="store_true", help="Defer text encoding.")
+    parser.add_argument("--only_text", action="store_true",
+                        help="Skip video encoding; only text-encode the curated captions.")
     parser.add_argument("--only_index", action="store_true", help="Only rebuild the index and exit.")
     args = parser.parse_args()
 
     if args.only_index:
+        build_index()
+        return
+
+    if args.only_text:
+        batch_text_encode()
         build_index()
         return
 
