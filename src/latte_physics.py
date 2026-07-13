@@ -169,6 +169,61 @@ class PredictorP(nn.Module):
         return predicted_vjepa
 
 
+class PhysicsFrameCrossAttn(nn.Module):
+    """Per-frame physics cross-attention.
+
+    Each transformer frame `f` cross-attends only to its matching VJEPA temporal
+    slice (`t = f // temporal_stride`), preserving VJEPA's spatial grid (S tokens
+    per slice) as KV. This replaces the previous "broadcast all 2048 VJEPA tokens
+    to every patch" pattern from the old temporal cross-attention.
+
+    Shapes:
+        hidden_states:      [B*N, T, C]        (N = num spatial patches, T = num frames)
+        physics_per_frame:  [B, T, S, C]       (VJEPA slice already gathered per frame)
+    """
+
+    def __init__(self, dim: int, num_heads: int, dim_head: int, dropout: float = 0.0, bias: bool = False):
+        super().__init__()
+        self.num_heads = num_heads
+        self.dim_head = dim_head
+        inner = num_heads * dim_head
+        self.norm = nn.LayerNorm(dim)
+        self.to_q = nn.Linear(dim, inner, bias=bias)
+        self.to_k = nn.Linear(dim, inner, bias=bias)
+        self.to_v = nn.Linear(dim, inner, bias=bias)
+        self.to_out = nn.Sequential(nn.Linear(inner, dim, bias=bias), nn.Dropout(dropout))
+        # Zero-init the output projection so untrained (frozen) blocks act as
+        # exact no-ops: hidden + to_out(out) == hidden. Top-8 will still learn
+        # nonzero physics conditioning through their gradients.
+        nn.init.zeros_(self.to_out[0].weight)
+        if self.to_out[0].bias is not None:
+            nn.init.zeros_(self.to_out[0].bias)
+
+    def forward(self, hidden_states: torch.Tensor, physics_per_frame: torch.Tensor) -> torch.Tensor:
+        BN, T, C = hidden_states.shape
+        B, T_p, S, _ = physics_per_frame.shape
+        assert T == T_p, f"frame count mismatch: hidden T={T} vs physics T={T_p}"
+        N = BN // B
+        H, D = self.num_heads, self.dim_head
+
+        q = self.to_q(self.norm(hidden_states))          # [B*N, T, H*D]
+        k = self.to_k(physics_per_frame)                 # [B, T, S, H*D]
+        v = self.to_v(physics_per_frame)                 # [B, T, S, H*D]
+
+        q = q.view(B, N, T, H, D)
+        k = k.view(B, T, S, H, D)
+        v = v.view(B, T, S, H, D)
+
+        # Per-(patch, frame, head) query attends only to that frame's VJEPA slice.
+        scale = D ** -0.5
+        scores = torch.einsum('bnthd,btshd->bnths', q, k) * scale
+        attn = scores.softmax(dim=-1).to(v.dtype)
+        out = torch.einsum('bnths,btshd->bnthd', attn, v)   # [B, N, T, H, D]
+
+        out = out.reshape(B * N, T, H * D)
+        return hidden_states + self.to_out(out)
+
+
 class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
     """
     Modified Latte with PredictorP for physics conditioning.
@@ -204,6 +259,8 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
         predictor_hidden_dim: int = 512,
         vjepa_dim: int = 1408,
         vjepa_seq_len: int = 2048,  # 16 frames: 256 spatial * 8 temporal patches
+        vjepa_temporal_slices: int = 8,   # VJEPA-2 tubelet: 16 model frames -> 8 slices
+        vjepa_spatial_tokens: int = 256,  # VJEPA-2 spatial grid: 16x16 at 256px input
         use_predictor: bool = True,
     ):
         super().__init__()
@@ -262,7 +319,9 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
             ]
         )
 
-        # 4. Define temporal transformers blocks (VJEPA physics conditioning)
+        # 4. Define temporal transformers blocks (self-attn only across frames).
+        #    Physics conditioning is now handled by a separate per-frame cross-attn
+        #    module (PhysicsFrameCrossAttn) applied after each temporal block.
         self.temporal_transformer_blocks = nn.ModuleList(
             [
                 BasicTransformerBlock(
@@ -270,7 +329,7 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
                     num_attention_heads,
                     attention_head_dim,
                     dropout=dropout,
-                    cross_attention_dim=inner_dim if use_predictor else None,  # VJEPA cross-attention
+                    cross_attention_dim=None,
                     activation_fn=activation_fn,
                     num_embeds_ada_norm=num_embeds_ada_norm,
                     attention_bias=attention_bias,
@@ -282,15 +341,37 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
             ]
         )
 
-        # 5. VJEPA projection (project to inner_dim for temporal blocks)
+        # 5. VJEPA projection + per-frame physics cross-attn.
         if use_predictor:
+            assert vjepa_temporal_slices * vjepa_spatial_tokens == vjepa_seq_len, (
+                f"vjepa_temporal_slices ({vjepa_temporal_slices}) * "
+                f"vjepa_spatial_tokens ({vjepa_spatial_tokens}) must equal "
+                f"vjepa_seq_len ({vjepa_seq_len})."
+            )
+            self.vjepa_temporal_slices = vjepa_temporal_slices
+            self.vjepa_spatial_tokens = vjepa_spatial_tokens
             self.vjepa_projection = nn.Sequential(
                 nn.Linear(vjepa_dim, inner_dim * 2),
                 nn.GELU(),
                 nn.Linear(inner_dim * 2, inner_dim),
             )
+            self.physics_cross_attn_blocks = nn.ModuleList(
+                [
+                    PhysicsFrameCrossAttn(
+                        dim=inner_dim,
+                        num_heads=num_attention_heads,
+                        dim_head=attention_head_dim,
+                        dropout=dropout,
+                        bias=attention_bias,
+                    )
+                    for _ in range(num_layers)
+                ]
+            )
         else:
+            self.vjepa_temporal_slices = None
+            self.vjepa_spatial_tokens = None
             self.vjepa_projection = None
+            self.physics_cross_attn_blocks = None
 
         # 6. Output layers
         self.out_channels = in_channels if out_channels is None else out_channels
@@ -382,32 +463,33 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
             num_frame, dim=0
         ).view(-1, encoder_hidden_states.shape[-2], encoder_hidden_states.shape[-1])
 
-        # Prepare VJEPA for temporal blocks
-        physics_embeddings_temporal = None
+        # Prepare per-frame physics KV: for each transformer frame f, gather the
+        # single VJEPA temporal slice `f // (num_frame // T_v)` that covers it,
+        # producing physics_per_frame with shape [B, num_frame, S, inner_dim].
+        physics_per_frame = None
         if physics_tokens is not None and self.vjepa_projection is not None:
-            physics_projected = self.vjepa_projection(physics_tokens)  # [B, 2048, inner_dim]
-            # physics_embeddings_temporal = physics_projected.repeat_interleave(
-            #     num_patches, dim=0
-            # ).view(-1, physics_projected.shape[-2], physics_projected.shape[-1])
-            physics_embeddings_temporal = physics_projected.unsqueeze(1).expand(
-                -1, num_patches, -1, -1
-                ).reshape(batch_size * num_patches, -1, physics_projected.shape[-1])
-            # physics_embeddings_temporal = physics_projected
-
+            physics_projected = self.vjepa_projection(physics_tokens)  # [B, T_v*S, inner_dim]
+            T_v = self.vjepa_temporal_slices
+            S = self.vjepa_spatial_tokens
+            physics_grid = physics_projected.view(batch_size, T_v, S, -1)  # [B, T_v, S, C]
+            stride = max(num_frame // T_v, 1)
+            frame_to_slice = (torch.arange(num_frame, device=hidden_states.device) // stride).clamp_(max=T_v - 1)
+            physics_per_frame = physics_grid[:, frame_to_slice]  # [B, num_frame, S, C]
 
         # Prepare timesteps
         timestep_spatial = timestep.repeat_interleave(num_frame, dim=0).view(-1, timestep.shape[-1])
         timestep_temp = timestep.repeat_interleave(num_patches, dim=0).view(-1, timestep.shape[-1])
 
         # ========== STEP 3: Spatial + Temporal blocks ==========
+        physics_blocks = self.physics_cross_attn_blocks
         for i, (spatial_block, temp_block) in enumerate(
             zip(self.transformer_blocks, self.temporal_transformer_blocks)
         ):
             # Spatial block (text conditioning)
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = checkpoint(
-                    spatial_block, hidden_states, None, encoder_hidden_states_spatial, 
-                    encoder_attention_mask, timestep_spatial, None, None, 
+                    spatial_block, hidden_states, None, encoder_hidden_states_spatial,
+                    encoder_attention_mask, timestep_spatial, None, None,
                     use_reentrant=False
                 )
             else:
@@ -432,23 +514,33 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
                 if i == 0 and num_frame > 1:
                     hidden_states = hidden_states + self.temp_pos_embed.to(hidden_states.dtype)
 
-                # Temporal block (VJEPA physics conditioning!)
+                # Temporal self-attention only (no cross-attn inside the block).
                 if torch.is_grad_enabled() and self.gradient_checkpointing:
                     hidden_states = checkpoint(
-                        temp_block, hidden_states, None, physics_embeddings_temporal, 
-                        None, timestep_temp, None, None, 
+                        temp_block, hidden_states, None, None,
+                        None, timestep_temp, None, None,
                         use_reentrant=False
                     )
                 else:
                     hidden_states = temp_block(
                         hidden_states,
                         None,
-                        physics_embeddings_temporal,  # ← VJEPA physics!
+                        None,
                         None,
                         timestep_temp,
                         None,
                         None,
                     )
+
+                # Per-frame physics cross-attention (frame f -> VJEPA slice f // stride).
+                if physics_blocks is not None and physics_per_frame is not None:
+                    if torch.is_grad_enabled() and self.gradient_checkpointing:
+                        hidden_states = checkpoint(
+                            physics_blocks[i], hidden_states, physics_per_frame,
+                            use_reentrant=False,
+                        )
+                    else:
+                        hidden_states = physics_blocks[i](hidden_states, physics_per_frame)
 
                 # Reshape back: (B*H*W, T, C) -> (B*T, H*W, C)
                 hidden_states = hidden_states.reshape(

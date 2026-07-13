@@ -207,33 +207,23 @@ def train_with_predictor(
         for param in model.vjepa_projection.parameters():
             param.requires_grad = True
     
-    # 3. Unfreeze temporal cross-attention (attn2 + norm2)
-    print("✓ Training: Temporal cross-attention layers")
-    num_blocks = len(model.temporal_transformer_blocks)
+    # 3. Unfreeze the top-N per-frame physics cross-attn blocks.
+    print("✓ Training: top-N physics cross-attention blocks")
     blocks_to_train = 8
+    physics_blocks = getattr(model, 'physics_cross_attn_blocks', None)
+    if physics_blocks is not None:
+        num_blocks = len(physics_blocks)
+        for i, block in enumerate(physics_blocks):
+            trainable = i >= (num_blocks - blocks_to_train)
+            for param in block.parameters():
+                param.requires_grad = trainable
 
-    for i, temp_block in enumerate(model.temporal_transformer_blocks):
-        if i >= (num_blocks - blocks_to_train):
-            if hasattr(temp_block, 'attn2'):
-                for param in temp_block.attn2.parameters():
-                    param.requires_grad = True
-            if hasattr(temp_block, 'norm2'):
-                for param in temp_block.norm2.parameters():
-                    param.requires_grad = True
-        else:
-            if hasattr(temp_block, 'attn2'):
-                for param in temp_block.attn2.parameters():
-                    param.requires_grad = False
-            if hasattr(temp_block, 'norm2'):
-                for param in temp_block.norm2.parameters():
-                    param.requires_grad = False
-    
     # Print trainable parameter breakdown
     predictor_params = sum(p.numel() for p in model.predictor.parameters() if p.requires_grad) if model.predictor else 0
     vjepa_proj_params = sum(p.numel() for p in model.vjepa_projection.parameters() if p.requires_grad) if model.vjepa_projection else 0
-    temporal_attn_params = sum(
-        p.numel() for temp_block in model.temporal_transformer_blocks 
-        for p in temp_block.parameters() if p.requires_grad
+    physics_attn_params = sum(
+        p.numel() for block in (physics_blocks or [])
+        for p in block.parameters() if p.requires_grad
     )
     total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
@@ -243,7 +233,7 @@ def train_with_predictor(
     print("="*60)
     print(f"PredictorP:              {predictor_params:>12,} params")
     print(f"VJEPA projection:        {vjepa_proj_params:>12,} params")
-    print(f"Temporal cross-attn:     {temporal_attn_params:>12,} params")
+    print(f"Physics cross-attn:      {physics_attn_params:>12,} params")
     print("-"*60)
     print(f"TOTAL TRAINABLE:         {total_trainable:>12,} params")
     print(f"TOTAL MODEL:             {total_params:>12,} params")
