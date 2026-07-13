@@ -115,10 +115,6 @@ def generate(args: argparse.Namespace) -> None:
         slug      = slugify(prompt)
         out_path  = OUTPUT_DIR / f"{prompt_id:02d}_{slug}.mp4"
 
-        if out_path.exists() and not args.overwrite:
-            print(f"[{prompt_id:02d}] Skipping (exists): {out_path.name}")
-            continue
-
         print(f"[{prompt_id:02d}] Generating: {prompt[:80]}")
 
         with torch.inference_mode():
@@ -149,7 +145,5 @@ if __name__ == "__main__":
                         help="Generate only this prompt id (for testing)")
     parser.add_argument("--sequential_offload", action="store_true",
                         help="Enable sequential CPU offload (for 24 GB GPUs)")
-    parser.add_argument("--overwrite",        action="store_true",
-                        help="Regenerate even if output file already exists")
     args = parser.parse_args()
     generate(args)
