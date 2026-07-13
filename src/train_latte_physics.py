@@ -92,6 +92,21 @@ class PhysicsVideoDataset(Dataset):
         }
 
 
+def push_checkpoint_to_hf(checkpoint_path, repo_id: str) -> None:
+    """Upload a single checkpoint file to a private HF model repo. Non-fatal on error."""
+    try:
+        from huggingface_hub import HfApi
+        HfApi().upload_file(
+            path_or_fileobj=str(checkpoint_path),
+            path_in_repo=checkpoint_path.name,
+            repo_id=repo_id,
+            repo_type="model",
+        )
+        print(f"  synced -> {repo_id}/{checkpoint_path.name}")
+    except Exception as e:
+        print(f"  ! HF checkpoint push failed: {e}")
+
+
 def train_with_predictor(
     index_json_path: str,
     output_dir: str = "./latte_predictor_checkpoints",
@@ -105,6 +120,7 @@ def train_with_predictor(
     resume_from_checkpoint: str = None,
     tf_warmup_frac: float = 0.25,
     tf_anneal_frac: float = 0.5,
+    hf_repo: str = None,
 ):
     """
     Joint training of PredictorP + temporal cross-attention layers.
@@ -453,7 +469,10 @@ def train_with_predictor(
             }, checkpoint_path)
             
             print(f"✓ Saved: {checkpoint_path}\n")
-    
+
+            if hf_repo is not None:
+                push_checkpoint_to_hf(checkpoint_path, hf_repo)
+
     print("✓ Training complete!")
 
 
@@ -477,6 +496,9 @@ if __name__ == "__main__":
                         help="Fraction of training with teacher forcing prob=1.0")
     parser.add_argument("--tf_anneal_frac", type=float, default=0.5,
                         help="Fraction of training over which teacher forcing prob anneals 1.0 -> 0.0")
+    parser.add_argument("--hf_repo", type=str, default=None,
+                        help="If set, push each epoch checkpoint to this HF model repo "
+                             "(e.g. Boxxxi/physvideogen-checkpoints).")
 
     args = parser.parse_args()
 
@@ -493,4 +515,5 @@ if __name__ == "__main__":
         resume_from_checkpoint=args.resume_from_checkpoint,
         tf_warmup_frac=args.tf_warmup_frac,
         tf_anneal_frac=args.tf_anneal_frac,
+        hf_repo=args.hf_repo,
     )
