@@ -317,6 +317,7 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         ground_truth_vjepa: Optional[torch.Tensor] = None,  # For training
+        teacher_force_prob: float = 0.0,
         enable_temporal_attentions: bool = True,
         return_dict: bool = True,
     ):
@@ -335,6 +336,11 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
         batch_size, channels, num_frame, height, width = hidden_states.shape
         
         # ========== STEP 1: Predict VJEPA tokens using PredictorP ==========
+        # Scheduled sampling: with probability `teacher_force_prob` (training only)
+        # feed ground-truth VJEPA into the temporal cross-attention; otherwise
+        # feed PredictorP's output. The training loop anneals p from 1.0 -> 0.0.
+        # `predicted_vjepa` is always returned so the training script can supervise
+        # PredictorP with its auxiliary MSE loss against ground truth.
         predicted_vjepa = None
         if self.use_predictor and self.predictor is not None:
             predicted_vjepa = self.predictor(
@@ -342,12 +348,13 @@ class LatteTransformer3DModelWithPhysics(ModelMixin, ConfigMixin, CacheMixin):
                 text_embeddings=encoder_hidden_states,
                 timesteps=timestep,
             )  # [B, 2048, 1408]
-            
-            # Use ground-truth during training if provided, else use predicted
-            if ground_truth_vjepa is not None and self.training:
-                physics_tokens = ground_truth_vjepa  # Teacher forcing
-            else:
-                physics_tokens = predicted_vjepa  # Use prediction
+            use_teacher_force = (
+                self.training
+                and ground_truth_vjepa is not None
+                and teacher_force_prob > 0.0
+                and torch.rand((), device=hidden_states.device).item() < teacher_force_prob
+            )
+            physics_tokens = ground_truth_vjepa if use_teacher_force else predicted_vjepa
         else:
             physics_tokens = ground_truth_vjepa if ground_truth_vjepa is not None else None
         

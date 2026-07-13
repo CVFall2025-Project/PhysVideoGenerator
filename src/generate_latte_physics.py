@@ -108,10 +108,13 @@ def generate_video_from_prompt(
     for t in scheduler.timesteps:
         # Expand latents for CFG
         latent_model_input = torch.cat([latents] * 2, dim=0)  # [2, T, C, H, W]
-        
+
+        # Model expects [B, C, T, H, W] (matches training layout)
+        latent_model_input = latent_model_input.permute(0, 2, 1, 3, 4)
+
         # Prepare timestep
         timestep = torch.tensor([t, t], device=device, dtype=torch.long)
-        
+
         # Predict noise (PredictorP predicts VJEPA automatically!)
         noise_pred, predicted_vjepa = model(
             latent_model_input,

@@ -12,6 +12,7 @@ Freezes:
 """
 
 import json
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -26,6 +27,21 @@ from latte_physics import LatteTransformer3DModelWithPhysics
 
 gc.collect()
 torch.cuda.empty_cache()
+
+
+def teacher_force_prob_at_step(step: int, total_steps: int, warmup_frac: float, anneal_frac: float) -> float:
+    """p=1 for the first `warmup_frac` of training, linear 1->0 over the next
+    `anneal_frac`, p=0 for the remainder. Anneals training away from GT VJEPA
+    conditioning and onto PredictorP's own output."""
+    if total_steps <= 0:
+        return 0.0
+    warmup_end = warmup_frac * total_steps
+    anneal_end = (warmup_frac + anneal_frac) * total_steps
+    if step < warmup_end:
+        return 1.0
+    if step >= anneal_end:
+        return 0.0
+    return 1.0 - (step - warmup_end) / max(anneal_end - warmup_end, 1e-9)
 
 class PhysicsVideoDataset(Dataset):
     """Dataset with VJEPA, VAE latents, and text embeddings."""
@@ -87,6 +103,8 @@ def train_with_predictor(
     mixed_precision: str = "bf16",
     num_train_samples: int = None,
     resume_from_checkpoint: str = None,
+    tf_warmup_frac: float = 0.25,
+    tf_anneal_frac: float = 0.5,
 ):
     """
     Joint training of PredictorP + temporal cross-attention layers.
@@ -279,6 +297,18 @@ def train_with_predictor(
     # Prepare for distributed training
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
+    # Total optimizer update steps across all epochs — drives the VJEPA
+    # teacher-forcing schedule (Bernoulli p = 1 -> 0 over training).
+    total_update_steps = max(
+        1,
+        math.ceil((len(dataloader) * num_epochs) / max(gradient_accumulation_steps, 1)),
+    )
+    print(
+        f"Teacher-force schedule: p=1 for first {tf_warmup_frac:.0%} of "
+        f"{total_update_steps} update steps, linear 1->0 over next "
+        f"{tf_anneal_frac:.0%}, p=0 afterwards."
+    )
+
     if checkpoint_to_load is not None:
         print(f"Loading checkpoint from {checkpoint_to_load}...")
         checkpoint = torch.load(checkpoint_to_load, map_location="cpu")
@@ -356,13 +386,18 @@ def train_with_predictor(
                 # Add noise
                 noise = torch.randn_like(latents)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                
+
+                tf_prob = teacher_force_prob_at_step(
+                    global_step, total_update_steps, tf_warmup_frac, tf_anneal_frac
+                )
+
                 # Forward pass (PredictorP predicts VJEPA, model uses it)
                 model_output, predicted_vjepa = model(
                     noisy_latents,
                     timestep=timesteps,
                     encoder_hidden_states=text_embeddings,
-                    ground_truth_vjepa=vjepa_gt,  # Use GT during training
+                    ground_truth_vjepa=vjepa_gt,
+                    teacher_force_prob=tf_prob,
                     enable_temporal_attentions=True,
                 )
                 
@@ -399,6 +434,7 @@ def train_with_predictor(
                     "loss": total_loss.detach().item(),
                     "noise": noise_loss.detach().item(),
                     "vjepa": vjepa_loss.detach().item(),
+                    "tf_p": tf_prob,
                 })
         
         # Epoch summary
@@ -447,9 +483,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--mixed_precision", type=str, default="bf16")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
-    
+    parser.add_argument("--tf_warmup_frac", type=float, default=0.25,
+                        help="Fraction of training with teacher forcing prob=1.0")
+    parser.add_argument("--tf_anneal_frac", type=float, default=0.5,
+                        help="Fraction of training over which teacher forcing prob anneals 1.0 -> 0.0")
+
     args = parser.parse_args()
-    
+
     train_with_predictor(
         index_json_path=args.index_json,
         output_dir=args.output_dir,
@@ -460,5 +500,7 @@ if __name__ == "__main__":
         vjepa_loss_weight=args.vjepa_weight,
         num_train_samples=args.num_samples,
         mixed_precision=args.mixed_precision,
-        resume_from_checkpoint=args.resume_from_checkpoint
+        resume_from_checkpoint=args.resume_from_checkpoint,
+        tf_warmup_frac=args.tf_warmup_frac,
+        tf_anneal_frac=args.tf_anneal_frac,
     )

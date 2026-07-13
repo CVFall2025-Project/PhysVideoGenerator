@@ -202,10 +202,13 @@ def run_inference(
     for i, t in enumerate(scheduler.timesteps):
         # Expand latents for classifier-free guidance
         latent_model_input = torch.cat([latents] * 2, dim=0)  # [2, T, C, H, W]
-        
+
+        # Model expects [B, C, T, H, W] (matches training layout)
+        latent_model_input = latent_model_input.permute(0, 2, 1, 3, 4)
+
         # Prepare timestep (needs to match batch size for CFG)
         timestep = torch.tensor([t, t], device=device, dtype=torch.long)
-        
+
         # Predict noise with PredictorP
         # Model automatically runs PredictorP to predict physics!
         noise_pred, predicted_vjepa = model(
