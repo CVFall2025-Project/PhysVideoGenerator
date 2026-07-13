@@ -50,8 +50,8 @@ MODEL_ID       = "maxin-cn/Latte-1"
 NUM_FRAMES     = 16       # Fixed by our latent shape [4, 16, 32, 32]
 NUM_STEPS      = 50       # DDIM steps; matches generate_latte_physics.py
 GUIDANCE_SCALE = 7.5
-HEIGHT         = 256      # Matches training resolution
-WIDTH          = 256
+HEIGHT         = 512      # Latte-1 trained at 512x512; 256 breaks positional embeddings
+WIDTH          = 512
 PLAYBACK_FPS   = 8        # Slower than training fps (12) for visual inspection
 
 
