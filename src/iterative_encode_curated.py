@@ -198,6 +198,22 @@ def batch_text_encode():
     torch.cuda.empty_cache()
 
 
+def push_to_hf(repo_id: str) -> None:
+    """Incremental sync of the encoded_videos folder to a private HF dataset.
+    HfApi().upload_folder only uploads files whose SHA differs from remote, so
+    calling this after each part is cheap once things are in steady state."""
+    try:
+        from huggingface_hub import HfApi
+        HfApi().upload_folder(
+            folder_path=ENCODED_ROOT,
+            repo_id=repo_id,
+            repo_type="dataset",
+        )
+        print(f"  synced -> {repo_id}")
+    except Exception as e:
+        print(f"  ! HF sync error: {e}", file=sys.stderr)
+
+
 def build_index():
     """Rebuild the index from scratch — only entries with all three modalities present."""
     print("\n=== Building index ===")
@@ -229,6 +245,9 @@ def main():
     parser.add_argument("--only_text", action="store_true",
                         help="Skip video encoding; only text-encode the curated captions.")
     parser.add_argument("--only_index", action="store_true", help="Only rebuild the index and exit.")
+    parser.add_argument("--hf_repo", type=str, default=None,
+                        help="If set, incrementally push encoded_videos to this HF dataset repo "
+                             "after each part that produces new encodings (e.g. Boxxxi/physvideogen-encoded).")
     args = parser.parse_args()
 
     if args.only_index:
@@ -238,6 +257,8 @@ def main():
     if args.only_text:
         batch_text_encode()
         build_index()
+        if args.hf_repo:
+            push_to_hf(args.hf_repo)
         return
 
     curated = set(pd.read_csv(CURATED_CSV)["video"].astype(str))
@@ -272,6 +293,11 @@ def main():
         cumulative = len([f for f in os.listdir(f"{ENCODED_ROOT}/vae") if f.endswith("_vae.npz")])
         print(f"  Cumulative encoded: {cumulative}/{len(curated)}")
 
+        # Push to HF whenever this part produced new encodings — small, incremental,
+        # and survives Colab dying between parts.
+        if args.hf_repo and encoded > 0:
+            push_to_hf(args.hf_repo)
+
         if cumulative >= len(curated):
             print("\nAll curated videos encoded. Stopping early.")
             break
@@ -290,6 +316,10 @@ def main():
         batch_text_encode()
 
     build_index()
+
+    # Final sync — catches text embeddings and the rebuilt index
+    if args.hf_repo:
+        push_to_hf(args.hf_repo)
 
     print(f"\n=== Done ===")
     print(f"Videos kept this run:    {total_kept}")
