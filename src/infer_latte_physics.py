@@ -45,8 +45,8 @@ def run_inference(
     checkpoint_path: str,
     output_path: str = "output_physics.mp4",
     num_frames: int = 16,
-    height: int = 256,
-    width: int = 256,
+    height: int = 512,
+    width: int = 512,
     num_steps: int = 50,
     guidance_scale: float = 7.5,
     seed: int = None,
@@ -111,7 +111,7 @@ def run_inference(
         dropout=0.0,
         cross_attention_dim=1152,
         attention_bias=False,
-        sample_size=32,  # 256/8 (VAE downscale factor)
+        sample_size=64,  # 512/8 (VAE downscale factor)
         patch_size=2,
         activation_fn="gelu-approximate",
         num_embeds_ada_norm=1000,
@@ -280,8 +280,8 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, required=True, help="Text prompt for video generation")
     parser.add_argument("--output", type=str, default="output_physics.mp4", help="Output video path")
     parser.add_argument("--num_frames", type=int, default=16, help="Number of frames")
-    parser.add_argument("--height", type=int, default=256, help="Video height")
-    parser.add_argument("--width", type=int, default=256, help="Video width")
+    parser.add_argument("--height", type=int, default=512, help="Video height")
+    parser.add_argument("--width", type=int, default=512, help="Video width")
     parser.add_argument("--steps", type=int, default=50, help="Denoising steps")
     parser.add_argument("--cfg_scale", type=float, default=7.5, help="CFG scale")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")

@@ -48,7 +48,7 @@ PROMPTS_CSV    = Path(__file__).parent / "eval_prompts.csv"
 OUTPUT_DIR     = Path(__file__).parent / "baseline_videos"
 MODEL_ID       = "maxin-cn/Latte-1"
 NUM_FRAMES     = 16       # Fixed by our latent shape [4, 16, 32, 32]
-NUM_STEPS      = 50       # DDIM steps; matches generate_latte_physics.py
+NUM_STEPS      = 50       # DDIM steps; use 25 for faster runs with similar quality
 GUIDANCE_SCALE = 7.5
 HEIGHT         = 512      # Latte-1 trained at 512x512; 256 breaks positional embeddings
 WIDTH          = 512
@@ -115,7 +115,10 @@ def generate(args: argparse.Namespace) -> None:
         slug      = slugify(prompt)
         out_path  = OUTPUT_DIR / f"{prompt_id:02d}_{slug}.mp4"
 
-        print(f"[{prompt_id:02d}] Generating: {prompt[:80]}")
+        # Seed is fixed per prompt_id so baseline and trained-model runs are comparable
+        generator = torch.Generator(device=device).manual_seed(prompt_id * 1000)
+
+        print(f"[{prompt_id:02d}] Generating (seed={prompt_id * 1000}): {prompt[:80]}")
 
         with torch.inference_mode():
             result = pipe(
@@ -126,6 +129,7 @@ def generate(args: argparse.Namespace) -> None:
                 width=WIDTH,
                 num_inference_steps=NUM_STEPS,
                 guidance_scale=GUIDANCE_SCALE,
+                generator=generator,
             )
 
         # diffusers LattePipeline returns result.frames: list[list[PIL.Image]]

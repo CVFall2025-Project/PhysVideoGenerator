@@ -140,7 +140,7 @@ def train_with_predictor(
         dropout=0.0,
         cross_attention_dim=1152,
         attention_bias=False,
-        sample_size=32,
+        sample_size=64,  # latent 64x64 -> pixel 512x512 (matches Latte-1 pretraining)
         patch_size=2,
         activation_fn="gelu-approximate",
         num_embeds_ada_norm=1000,

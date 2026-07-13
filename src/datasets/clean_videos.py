@@ -86,7 +86,8 @@ class VideoProcessor:
     def __init__(
         self,
         target_fps: int = 12,
-        frame_size: int = 256,
+        vae_frame_size: int = 512,
+        vjepa_frame_size: int = 256,
         num_frames: int = 16,
         vjepa_mean: Tuple[float, float, float] = (0.485, 0.456, 0.406),
         vjepa_std: Tuple[float, float, float] = (0.229, 0.224, 0.225),
@@ -94,19 +95,14 @@ class VideoProcessor:
         device: str = "cpu",
     ):
         """Initialize video processor.
-        
-        Args:
-            target_fps: target frames per second for loading videos
-            vae_height, vae_width: VAE input dimensions
-            vae_frames: number of frames for VAE (should be 49)
-            vjepa_size: square size for VJEPA2 (should be 256)
-            vjepa_frames: number of frames for VJEPA2 (should be 48, must be even)
-            vjepa_mean, vjepa_std: ImageNet normalization stats
-            use_decord: if True, use Decord; else use OpenCV fallback
-            device: torch device for processing
+
+        VAE and VJEPA branches use different resolutions:
+          - VAE frames feed Latte-1, pretrained at 512x512.
+          - VJEPA frames feed vjepa2-vitg-fpc64-256, a 256-native encoder.
         """
         self.target_fps = target_fps
-        self.frame_size = frame_size
+        self.vae_frame_size = vae_frame_size
+        self.vjepa_frame_size = vjepa_frame_size
         self.num_frames = num_frames
         self.vjepa_mean = vjepa_mean
         self.vjepa_std = vjepa_std
@@ -130,14 +126,11 @@ class VideoProcessor:
 
     def process_video(self, frames_np: np.ndarray) -> Dict[str, np.ndarray]:
         """Process raw video frames into VAE and VJEPA2 formats.
-        
-        Args:
-            frames_np: (T, H, W, 3) uint8 numpy array
-        
+
         Returns:
             {
-                "vae": (3, 16, 256, 256) float32 in [-1, 1],
-                "vjepa": (3, 16, 256, 256) float32 ImageNet normalized
+                "vae":   [1, num_frames, 3, vae_frame_size, vae_frame_size]   float16, [-1, 1],
+                "vjepa": [num_frames, 3, vjepa_frame_size, vjepa_frame_size]  float16, ImageNet normalized
             }
         """
         # Convert to torch tensor (T, H, W, 3) and move to device
@@ -150,41 +143,31 @@ class VideoProcessor:
         W_orig = video_tensor.shape[3]
         min_dim = min(H_orig, W_orig)
 
-        video = F.center_crop(video_tensor, [min_dim, min_dim])
-        video = F.resize(video, [self.frame_size, self.frame_size])
-
-        T = video.shape[0]
-
-        indices = torch.linspace(0, T - 1, self.num_frames, device=video_tensor.device).long()
-
-        video = video[indices]
-
+        # Center-crop to square, then subsample uniformly to num_frames before
+        # resizing so each branch resizes only 16 frames rather than the full clip.
+        cropped = F.center_crop(video_tensor, [min_dim, min_dim])
+        T = cropped.shape[0]
+        indices = torch.linspace(0, T - 1, self.num_frames, device=cropped.device).long()
+        cropped = cropped[indices]  # [num_frames, 3, min_dim, min_dim]
 
         # ---------------------------------------------------------
-        # Pipeline A: VAE (256x256, 16 frames, [-1, 1])
+        # Pipeline A: VAE (vae_frame_size, [-1, 1])
         # ---------------------------------------------------------
-        # Normalize to [-1, 1]
-        vae_video = video.clone().detach()
+        vae_video = F.resize(cropped, [self.vae_frame_size, self.vae_frame_size])
         vae_video = (vae_video / 127.5) - 1.0
-
-        # Permute to [1, 16, 3 , 256, 256] for VAE input
-        vae_video = vae_video.unsqueeze(0)
+        vae_video = vae_video.unsqueeze(0)  # [1, num_frames, 3, H, W]
 
         # ---------------------------------------------------------
-        # Pipeline B: VJEPA2 (256x256, 16 frames, ImageNet normalized)
+        # Pipeline B: VJEPA2 (vjepa_frame_size, ImageNet normalized)
         # ---------------------------------------------------------
-        # Normalize to [0, 1] then apply ImageNet normalization
-        vjepa_video = video.clone().detach()
-        vjepa_video = video / 255.0
-
-        # Apply ImageNet normalization per-channel
+        vjepa_video = F.resize(cropped, [self.vjepa_frame_size, self.vjepa_frame_size])
+        vjepa_video = vjepa_video / 255.0
         for c in range(3):
             vjepa_video[:, c] = (vjepa_video[:, c] - self.vjepa_mean[c]) / self.vjepa_std[c]
 
-        # Move outputs back to CPU and convert to numpy for saving (keeps API unchanged)
         return {
-            "vae": vae_video.cpu().numpy().astype(np.float16), # [1, 16, 3, 256, 256]
-            "vjepa": vjepa_video.cpu().numpy().astype(np.float16), # [16, 3, 256, 256]
+            "vae": vae_video.cpu().numpy().astype(np.float16),
+            "vjepa": vjepa_video.cpu().numpy().astype(np.float16),
         }
 
     def process_video_to_file(
