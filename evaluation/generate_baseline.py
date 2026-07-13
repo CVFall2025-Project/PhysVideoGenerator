@@ -122,7 +122,7 @@ def generate(args: argparse.Namespace) -> None:
             result = pipe(
                 prompt=prompt,
                 negative_prompt="blurry, low quality, static, no motion",
-                num_frames=NUM_FRAMES,
+                video_length=NUM_FRAMES,
                 height=HEIGHT,
                 width=WIDTH,
                 num_inference_steps=NUM_STEPS,
