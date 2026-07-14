@@ -141,8 +141,12 @@ class PredictorP(nn.Module):
         # 2. Project text embeddings
         text_features = self.text_proj(text_embeddings)  # [B, text_seq_len, hidden_dim]
         
-        # 3. Get timestep embeddings
+        # 3. Get timestep embeddings — cast to model dtype so it matches
+        # time_proj's weight precision (fp16/bf16). Training relied on
+        # accelerator's autocast to bridge fp32 -> low-precision matmul; at
+        # inference there's no autocast context so we cast explicitly.
         time_emb = self.get_timestep_embedding(timesteps, self.hidden_dim)  # [B, hidden_dim]
+        time_emb = time_emb.to(dtype=self.time_proj[0].weight.dtype)
         time_emb = self.time_proj(time_emb).unsqueeze(1)  # [B, 1, hidden_dim]
         
         # 4. Fuse: latent + text + time
