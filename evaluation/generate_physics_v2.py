@@ -140,14 +140,24 @@ class PhysicsPipelineAdapter(torch.nn.Module):
         # Physics model returns:
         #   return_dict=True  -> (Transformer2DModelOutput, predicted_vjepa)
         #   return_dict=False -> (output_tensor, predicted_vjepa)
-        # LattePipeline calls the transformer with return_dict=False and does
-        # `transformer(...)[0]`, expecting a single-element tuple like the
-        # vanilla LatteTransformer3DModel returns. Rewrap accordingly.
         first = result[0] if isinstance(result, tuple) else result
+
+        # LattePipeline expects the transformer output to have 2x latent_channels
+        # (noise + learned sigma) and does `noise_pred.chunk(2, dim=1)[0]` to take
+        # the noise half. Our physics model outputs only latent_channels (noise only),
+        # so we pad a zero sigma-half along channel dim before returning. Pipeline
+        # then chunks back to our original noise prediction.
+        def _pad_sigma(sample_tensor: torch.Tensor) -> torch.Tensor:
+            zeros = torch.zeros_like(sample_tensor)
+            return torch.cat([sample_tensor, zeros], dim=1)  # [B, 2C, T, H, W]
+
         if return_dict:
-            return first          # Transformer2DModelOutput; pipeline uses .sample
+            # first is Transformer2DModelOutput; rebuild with padded sample
+            from diffusers.models.modeling_outputs import Transformer2DModelOutput
+            return Transformer2DModelOutput(sample=_pad_sigma(first.sample))
         else:
-            return (first,)       # single-element tuple; pipeline uses [0]
+            # first is a tensor; wrap in single-element tuple with padded output
+            return (_pad_sigma(first),)
 
 
 def generate(args: argparse.Namespace) -> None:
