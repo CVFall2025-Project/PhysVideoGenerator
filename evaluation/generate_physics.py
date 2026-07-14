@@ -234,7 +234,9 @@ def generate(args: argparse.Namespace) -> None:
 
         print(f"[{prompt_id:02d}] Generating (seed={prompt_id * 1000}): {prompt[:80]}")
 
-        with torch.inference_mode():
+        # autocast matches training's mixed_precision="bf16"; without it,
+        # fp32 sinusoidal timestep embeddings hit bf16 Linear weights.
+        with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             encoder_hidden_states = encode_prompt(
                 tokenizer, text_model, prompt, device, dtype=torch.bfloat16
             )
