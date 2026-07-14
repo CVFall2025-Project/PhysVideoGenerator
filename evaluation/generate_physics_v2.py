@@ -126,7 +126,6 @@ class PhysicsPipelineAdapter(torch.nn.Module):
     ):
         # Physics model builds added_cond_kwargs internally; discard pipeline's
         _ = added_cond_kwargs
-        # Any physics-training-only kwargs the pipeline never sends but be safe
         kwargs.pop("ground_truth_vjepa", None)
         kwargs.pop("teacher_force_prob", None)
 
@@ -138,10 +137,17 @@ class PhysicsPipelineAdapter(torch.nn.Module):
             enable_temporal_attentions=enable_temporal_attentions,
             return_dict=return_dict,
         )
-        # Unwrap the physics tuple
-        if isinstance(result, tuple):
-            return result[0]
-        return result
+        # Physics model returns:
+        #   return_dict=True  -> (Transformer2DModelOutput, predicted_vjepa)
+        #   return_dict=False -> (output_tensor, predicted_vjepa)
+        # LattePipeline calls the transformer with return_dict=False and does
+        # `transformer(...)[0]`, expecting a single-element tuple like the
+        # vanilla LatteTransformer3DModel returns. Rewrap accordingly.
+        first = result[0] if isinstance(result, tuple) else result
+        if return_dict:
+            return first          # Transformer2DModelOutput; pipeline uses .sample
+        else:
+            return (first,)       # single-element tuple; pipeline uses [0]
 
 
 def generate(args: argparse.Namespace) -> None:
