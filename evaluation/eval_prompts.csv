@@ -1,0 +1,26 @@
+id,prompt,category,physics_phenomena,training_coverage
+1,"A person pours water from a clear bottle into a tall glass on a wooden table",fluid_pouring,stream narrowing as fluid falls and impact splash,high
+2,"A chef pours thick pancake batter onto a hot griddle and it spreads into a round circle",fluid_pouring,viscous spreading and surface tension on heated surface,high
+3,"A hand pours olive oil from a bottle in a thin stream into a pan on a stove",fluid_pouring,thin stream formation and pooling dynamics,high
+4,"Coffee is poured from a pot into a white mug sitting on a kitchen counter",fluid_pouring,stream continuity and color mixing as liquid fills container,high
+5,"A bartender slowly pours red wine into a wine glass held at an angle",fluid_pouring,laminar flow and stream behavior at tilt angle,high
+6,"A person pours orange juice from a carton into a glass until it is nearly full",fluid_pouring,stream and splash as liquid level rises,high
+7,"A cook pours a yellow sauce from a measuring cup over a piece of chicken on a plate",fluid_pouring,viscous pour spreading over a surface,high
+8,"A child carefully pours milk from a small jug into a bowl of cereal",fluid_pouring,controlled pour and liquid spreading in bowl,high
+9,"A baker pours melted chocolate from a bowl over a cake placed on a wire rack",fluid_pouring,viscous chocolate coating and drape over curved surface,high
+10,"A person tips a teapot and pours hot tea into a small cup on a tray",fluid_pouring,controlled stream from narrow spout at angle,high
+11,"Honey drips slowly from a wooden spoon into a glass bowl leaving a thick strand",viscous_drip,viscous thread formation and coiling at base,medium
+12,"A spoon lifts out of a jar of ketchup and a red drop stretches then falls back in",viscous_drip,viscoelastic thread elongation and droplet detachment,medium
+13,"A person drizzles golden syrup from a spoon over a stack of pancakes on a plate",viscous_drip,viscous flow and spreading on horizontal surface,medium
+14,"A soccer player in a blue jersey runs up and kicks a ball toward the goal",projectile_ball,curved ball trajectory and foot-ball impulse transfer,high
+15,"A quarterback in a white uniform winds up and throws a spiral pass down the field",projectile_ball,parabolic arc and ball spin during flight,high
+16,"A basketball player dribbles twice then releases a shot toward the basket",projectile_ball,projectile arc from release point to rim,high
+17,"A baseball pitcher winds up and throws a fastball toward home plate",projectile_ball,high-speed projectile motion with slight arc,high
+18,"Two children on a lawn toss a red ball back and forth between them",projectile_ball,symmetric projectile arcs at low speed,high
+19,"A soccer player takes a free kick and the ball curves through the air around a wall of defenders",projectile_ball,Magnus effect curve and projectile trajectory,high
+20,"A basketball player catches a pass and immediately shoots from the three-point line",projectile_ball,catch momentum absorption and immediate projectile launch,high
+21,"A woman standing in a kitchen tosses a small ball of dough from hand to hand",projectile_ball,low-speed short-arc toss and hand catch deformation,high
+22,"A bowler walks up to the lane and releases a blue bowling ball that rolls toward the pins",bowling,rolling rigid body and straight-line trajectory on flat surface,medium
+23,"A bowling ball rolls steadily down a polished lane and strikes the center pin scattering all ten",bowling,rolling ball collision and pin scatter dynamics,medium
+24,"A person pours a glass of water from a pitcher into a row of glasses lined up on a counter",fluid_pouring,sequential pouring and stream interruption between containers,high
+25,"A cook pours beaten eggs from a bowl into a hot frying pan and they begin to spread and set",fluid_pouring,fluid spreading on heated surface and phase transition from liquid to solid,high

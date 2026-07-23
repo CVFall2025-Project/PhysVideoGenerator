@@ -9,3 +9,5 @@ __pycache__/
 logs/
 wandb/
 *.py.save
+src/prepare_single_video.py
+src/evaluate/

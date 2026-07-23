@@ -12,6 +12,7 @@ Freezes:
 """
 
 import json
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -26,6 +27,21 @@ from latte_physics import LatteTransformer3DModelWithPhysics
 
 gc.collect()
 torch.cuda.empty_cache()
+
+
+def teacher_force_prob_at_step(step: int, total_steps: int, warmup_frac: float, anneal_frac: float) -> float:
+    """p=1 for the first `warmup_frac` of training, linear 1->0 over the next
+    `anneal_frac`, p=0 for the remainder. Anneals training away from GT VJEPA
+    conditioning and onto PredictorP's own output."""
+    if total_steps <= 0:
+        return 0.0
+    warmup_end = warmup_frac * total_steps
+    anneal_end = (warmup_frac + anneal_frac) * total_steps
+    if step < warmup_end:
+        return 1.0
+    if step >= anneal_end:
+        return 0.0
+    return 1.0 - (step - warmup_end) / max(anneal_end - warmup_end, 1e-9)
 
 class PhysicsVideoDataset(Dataset):
     """Dataset with VJEPA, VAE latents, and text embeddings."""
@@ -76,6 +92,21 @@ class PhysicsVideoDataset(Dataset):
         }
 
 
+def push_checkpoint_to_hf(checkpoint_path, repo_id: str) -> None:
+    """Upload a single checkpoint file to a private HF model repo. Non-fatal on error."""
+    try:
+        from huggingface_hub import HfApi
+        HfApi().upload_file(
+            path_or_fileobj=str(checkpoint_path),
+            path_in_repo=checkpoint_path.name,
+            repo_id=repo_id,
+            repo_type="model",
+        )
+        print(f"  synced -> {repo_id}/{checkpoint_path.name}")
+    except Exception as e:
+        print(f"  ! HF checkpoint push failed: {e}")
+
+
 def train_with_predictor(
     index_json_path: str,
     output_dir: str = "./latte_predictor_checkpoints",
@@ -87,6 +118,9 @@ def train_with_predictor(
     mixed_precision: str = "bf16",
     num_train_samples: int = None,
     resume_from_checkpoint: str = None,
+    tf_warmup_frac: float = 0.25,
+    tf_anneal_frac: float = 0.5,
+    hf_repo: str = None,
 ):
     """
     Joint training of PredictorP + temporal cross-attention layers.
@@ -117,12 +151,12 @@ def train_with_predictor(
         num_attention_heads=16,
         attention_head_dim=72,
         in_channels=4,
-        out_channels=4,
+        out_channels=8,
         num_layers=28,
         dropout=0.0,
         cross_attention_dim=1152,
-        attention_bias=False,
-        sample_size=32,
+        attention_bias=True,
+        sample_size=64,  # latent 64x64 -> pixel 512x512 (matches Latte-1 pretraining)
         patch_size=2,
         activation_fn="gelu-approximate",
         num_embeds_ada_norm=1000,
@@ -154,7 +188,21 @@ def train_with_predictor(
         for key in pretrained_state:
             if key in model_state and model_state[key].shape == pretrained_state[key].shape:
                 model_state[key] = pretrained_state[key]
-        
+
+        loaded_keys = 0
+        for key in pretrained_state:
+            if key in model_state and model_state[key].shape == pretrained_state[key].shape:
+                loaded_keys += 1
+        missing = [k for k in pretrained_state
+                   if k not in model_state or model_state[k].shape != pretrained_state[k].shape]
+        if missing:
+            print(f"WARNING: {len(missing)} pretrained keys silently dropped. First 10:")
+            for k in missing[:10]:
+                model_shape = model_state[k].shape if k in model_state else "MISSING"
+                print(f"  {k}: pretrained={pretrained_state[k].shape} model={model_shape}")
+            raise RuntimeError("Pretrained loading incomplete. Fix config and retry.")
+        print(f"Pretrained loading: {loaded_keys}/{len(pretrained_state)} keys loaded cleanly.")
+
         model.load_state_dict(model_state, strict=False)
         print("✓ Loaded pretrained Latte base")
 
@@ -189,33 +237,23 @@ def train_with_predictor(
         for param in model.vjepa_projection.parameters():
             param.requires_grad = True
     
-    # 3. Unfreeze temporal cross-attention (attn2 + norm2)
-    print("✓ Training: Temporal cross-attention layers")
-    num_blocks = len(model.temporal_transformer_blocks)
+    # 3. Unfreeze the top-N per-frame physics cross-attn blocks.
+    print("✓ Training: top-N physics cross-attention blocks")
     blocks_to_train = 8
+    physics_blocks = getattr(model, 'physics_cross_attn_blocks', None)
+    if physics_blocks is not None:
+        num_blocks = len(physics_blocks)
+        for i, block in enumerate(physics_blocks):
+            trainable = i >= (num_blocks - blocks_to_train)
+            for param in block.parameters():
+                param.requires_grad = trainable
 
-    for i, temp_block in enumerate(model.temporal_transformer_blocks):
-        if i >= (num_blocks - blocks_to_train):
-            if hasattr(temp_block, 'attn2'):
-                for param in temp_block.attn2.parameters():
-                    param.requires_grad = True
-            if hasattr(temp_block, 'norm2'):
-                for param in temp_block.norm2.parameters():
-                    param.requires_grad = True
-        else:
-            if hasattr(temp_block, 'attn2'):
-                for param in temp_block.attn2.parameters():
-                    param.requires_grad = False
-            if hasattr(temp_block, 'norm2'):
-                for param in temp_block.norm2.parameters():
-                    param.requires_grad = False
-    
     # Print trainable parameter breakdown
     predictor_params = sum(p.numel() for p in model.predictor.parameters() if p.requires_grad) if model.predictor else 0
     vjepa_proj_params = sum(p.numel() for p in model.vjepa_projection.parameters() if p.requires_grad) if model.vjepa_projection else 0
-    temporal_attn_params = sum(
-        p.numel() for temp_block in model.temporal_transformer_blocks 
-        for p in temp_block.parameters() if p.requires_grad
+    physics_attn_params = sum(
+        p.numel() for block in (physics_blocks or [])
+        for p in block.parameters() if p.requires_grad
     )
     total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
@@ -225,21 +263,16 @@ def train_with_predictor(
     print("="*60)
     print(f"PredictorP:              {predictor_params:>12,} params")
     print(f"VJEPA projection:        {vjepa_proj_params:>12,} params")
-    print(f"Temporal cross-attn:     {temporal_attn_params:>12,} params")
+    print(f"Physics cross-attn:      {physics_attn_params:>12,} params")
     print("-"*60)
     print(f"TOTAL TRAINABLE:         {total_trainable:>12,} params")
     print(f"TOTAL MODEL:             {total_params:>12,} params")
     print(f"Percentage trainable:    {100*total_trainable/total_params:>11.2f}%")
     print("="*60 + "\n")
     
-    # Noise scheduler
-    noise_scheduler = DDPMScheduler(
-        num_train_timesteps=1000,
-        beta_schedule="scaled_linear",
-        beta_start=0.0001,
-        beta_end=0.02,
-        clip_sample=False,
-    )
+    # Noise scheduler — pull Latte-1's shipped config so training and inference
+    # use the same beta curve (linear, not scaled_linear).
+    noise_scheduler = DDPMScheduler.from_pretrained("maxin-cn/Latte-1", subfolder="scheduler")
     
     # Optimizer (only trainable params)
     optimizer = torch.optim.AdamW(
@@ -278,6 +311,18 @@ def train_with_predictor(
 
     # Prepare for distributed training
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+
+    # Total optimizer update steps across all epochs — drives the VJEPA
+    # teacher-forcing schedule (Bernoulli p = 1 -> 0 over training).
+    total_update_steps = max(
+        1,
+        math.ceil((len(dataloader) * num_epochs) / max(gradient_accumulation_steps, 1)),
+    )
+    print(
+        f"Teacher-force schedule: p=1 for first {tf_warmup_frac:.0%} of "
+        f"{total_update_steps} update steps, linear 1->0 over next "
+        f"{tf_anneal_frac:.0%}, p=0 afterwards."
+    )
 
     if checkpoint_to_load is not None:
         print(f"Loading checkpoint from {checkpoint_to_load}...")
@@ -356,22 +401,36 @@ def train_with_predictor(
                 # Add noise
                 noise = torch.randn_like(latents)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                
+
+                tf_prob = teacher_force_prob_at_step(
+                    global_step, total_update_steps, tf_warmup_frac, tf_anneal_frac
+                )
+
+                # 10% chance to drop text conditioning so PredictorP and physics
+                # cross-attn learn the null-prompt distribution used by CFG at
+                # inference (guidance_scale > 1).
+                if torch.rand((), device=text_embeddings.device).item() < 0.1:
+                    text_embeddings = torch.zeros_like(text_embeddings)
+
                 # Forward pass (PredictorP predicts VJEPA, model uses it)
                 model_output, predicted_vjepa = model(
                     noisy_latents,
                     timestep=timesteps,
                     encoder_hidden_states=text_embeddings,
-                    ground_truth_vjepa=vjepa_gt,  # Use GT during training
+                    ground_truth_vjepa=vjepa_gt,
+                    teacher_force_prob=tf_prob,
                     enable_temporal_attentions=True,
                 )
                 
-                # Loss 1: Noise prediction (main diffusion loss)
-                noise_loss = F.mse_loss(model_output.sample.to(torch.bfloat16), noise.to(torch.bfloat16), reduction="mean")
-                
+                # Loss 1: Noise prediction (main diffusion loss). Model outputs
+                # 8 channels (noise + learned variance); supervise only the
+                # first 4 (noise). Compute in fp32 to preserve small gradients.
+                model_output_noise = model_output.sample[:, :4]
+                noise_loss = F.mse_loss(model_output_noise.float(), noise.float(), reduction="mean")
+
                 # Loss 2: VJEPA prediction (PredictorP supervised by ground truth)
-                vjepa_loss = F.mse_loss(predicted_vjepa.to(torch.bfloat16), vjepa_gt.to(torch.bfloat16), reduction="mean")
-                
+                vjepa_loss = F.mse_loss(predicted_vjepa.float(), vjepa_gt.float(), reduction="mean")
+
                 # Combined loss
                 total_loss = noise_loss + vjepa_loss_weight * vjepa_loss
                 
@@ -399,6 +458,7 @@ def train_with_predictor(
                     "loss": total_loss.detach().item(),
                     "noise": noise_loss.detach().item(),
                     "vjepa": vjepa_loss.detach().item(),
+                    "tf_p": tf_prob,
                 })
         
         # Epoch summary
@@ -427,7 +487,10 @@ def train_with_predictor(
             }, checkpoint_path)
             
             print(f"✓ Saved: {checkpoint_path}\n")
-    
+
+            if hf_repo is not None:
+                push_checkpoint_to_hf(checkpoint_path, hf_repo)
+
     print("✓ Training complete!")
 
 
@@ -447,9 +510,16 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--mixed_precision", type=str, default="bf16")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
-    
+    parser.add_argument("--tf_warmup_frac", type=float, default=0.25,
+                        help="Fraction of training with teacher forcing prob=1.0")
+    parser.add_argument("--tf_anneal_frac", type=float, default=0.5,
+                        help="Fraction of training over which teacher forcing prob anneals 1.0 -> 0.0")
+    parser.add_argument("--hf_repo", type=str, default=None,
+                        help="If set, push each epoch checkpoint to this HF model repo "
+                             "(e.g. Boxxxi/physvideogen-checkpoints).")
+
     args = parser.parse_args()
-    
+
     train_with_predictor(
         index_json_path=args.index_json,
         output_dir=args.output_dir,
@@ -460,5 +530,8 @@ if __name__ == "__main__":
         vjepa_loss_weight=args.vjepa_weight,
         num_train_samples=args.num_samples,
         mixed_precision=args.mixed_precision,
-        resume_from_checkpoint=args.resume_from_checkpoint
+        resume_from_checkpoint=args.resume_from_checkpoint,
+        tf_warmup_frac=args.tf_warmup_frac,
+        tf_anneal_frac=args.tf_anneal_frac,
+        hf_repo=args.hf_repo,
     )

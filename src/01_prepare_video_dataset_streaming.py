@@ -129,8 +129,15 @@ def run_streaming_pipeline(
     csv_path = os.path.join(paths["csv_data"], "OpenVid-1M.csv")
     if not os.path.exists(csv_path):
         logger.warning(f"CSV not found: {csv_path}. Skipping text encoding.")
-        return {}   
+        return {}
     csv_df = pd.read_csv(csv_path)
+
+    # Restrict to the curated subset if the curated CSV is present.
+    curated_csv_path = os.path.join(paths["csv_data"], "curated_OpenVid-1M.csv")
+    curated_set = None
+    if os.path.exists(curated_csv_path):
+        curated_set = set(pd.read_csv(curated_csv_path)["video"].astype(str))
+        logger.info(f"Curated CSV found: restricting to {len(curated_set)} clips.")
 
     # Process videos present in the `raw_videos` folder (downloader runs separately)
     if not os.path.exists(paths["raw_videos"]):
@@ -140,18 +147,23 @@ def run_streaming_pipeline(
     video_files = [
         f for f in os.listdir(paths["raw_videos"]) if f.lower().endswith((".mp4"))
     ]
-    
+
     random.shuffle(video_files)
 
     shortlisted_videos = []
     cnt = 0
     for file_name in video_files:
-        if cnt > limit:
+        if limit is not None and cnt >= limit:
             break
-        duration = csv_df[csv_df["video"]==file_name]["seconds"].values[0]
-        if duration<=4.0:
+        if curated_set is not None and file_name not in curated_set:
+            continue
+        row = csv_df[csv_df["video"] == file_name]
+        if row.empty:
+            continue
+        duration = row["seconds"].values[0]
+        if duration <= 4.0:
             shortlisted_videos.append(file_name)
-            cnt+=1
+            cnt += 1
     
     print(f"Found suitable {len(shortlisted_videos)} videos")
 
