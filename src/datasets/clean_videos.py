@@ -158,12 +158,13 @@ class VideoProcessor:
         vae_video = vae_video.unsqueeze(0)  # [1, num_frames, 3, H, W]
 
         # ---------------------------------------------------------
-        # Pipeline B: VJEPA2 (vjepa_frame_size, ImageNet normalized)
+        # Pipeline B: VJEPA2 (vjepa_frame_size, [0,1] float)
+        # AutoVideoProcessor inside VJEPA2Encoder handles ImageNet
+        # normalization — do NOT do it here or the tokens are computed
+        # from doubly-normalized inputs (semantically null signal).
         # ---------------------------------------------------------
         vjepa_video = F.resize(cropped, [self.vjepa_frame_size, self.vjepa_frame_size])
         vjepa_video = vjepa_video / 255.0
-        for c in range(3):
-            vjepa_video[:, c] = (vjepa_video[:, c] - self.vjepa_mean[c]) / self.vjepa_std[c]
 
         return {
             "vae": vae_video.cpu().numpy().astype(np.float16),

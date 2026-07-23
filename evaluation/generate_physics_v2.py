@@ -64,11 +64,11 @@ def build_physics_model(checkpoint_path: str, device: str, dtype=torch.float16):
         num_attention_heads=16,
         attention_head_dim=72,
         in_channels=4,
-        out_channels=4,
+        out_channels=8,
         num_layers=28,
         dropout=0.0,
         cross_attention_dim=1152,
-        attention_bias=False,
+        attention_bias=True,
         sample_size=64,
         patch_size=2,
         activation_fn="gelu-approximate",
@@ -142,22 +142,12 @@ class PhysicsPipelineAdapter(torch.nn.Module):
         #   return_dict=False -> (output_tensor, predicted_vjepa)
         first = result[0] if isinstance(result, tuple) else result
 
-        # LattePipeline expects the transformer output to have 2x latent_channels
-        # (noise + learned sigma) and does `noise_pred.chunk(2, dim=1)[0]` to take
-        # the noise half. Our physics model outputs only latent_channels (noise only),
-        # so we pad a zero sigma-half along channel dim before returning. Pipeline
-        # then chunks back to our original noise prediction.
-        def _pad_sigma(sample_tensor: torch.Tensor) -> torch.Tensor:
-            zeros = torch.zeros_like(sample_tensor)
-            return torch.cat([sample_tensor, zeros], dim=1)  # [B, 2C, T, H, W]
-
+        # Model natively outputs 8 channels (noise + learned sigma). LattePipeline
+        # calls chunk(2, dim=1)[0] downstream to take the noise half.
         if return_dict:
-            # first is Transformer2DModelOutput; rebuild with padded sample
-            from diffusers.models.modeling_outputs import Transformer2DModelOutput
-            return Transformer2DModelOutput(sample=_pad_sigma(first.sample))
+            return first
         else:
-            # first is a tensor; wrap in single-element tuple with padded output
-            return (_pad_sigma(first),)
+            return (first,)
 
 
 def generate(args: argparse.Namespace) -> None:
@@ -171,6 +161,11 @@ def generate(args: argparse.Namespace) -> None:
 
     print(f"Loading LattePipeline from {MODEL_ID} (fp16) ...")
     pipe = LattePipeline.from_pretrained(MODEL_ID, torch_dtype=torch.float16).to(device)
+
+    # Match training-time T5 sequence length (226) instead of the pipeline's
+    # default (120), so caption_projection sees the same shape.
+    pipe.tokenizer.model_max_length = 226
+    print(f"Tokenizer max length forced to: {pipe.tokenizer.model_max_length}")
 
     print(f"Loading physics-trained transformer (fp16) from {args.checkpoint} ...")
     physics_model = build_physics_model(args.checkpoint, device, dtype=torch.float16)

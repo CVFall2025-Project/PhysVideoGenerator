@@ -151,11 +151,11 @@ def train_with_predictor(
         num_attention_heads=16,
         attention_head_dim=72,
         in_channels=4,
-        out_channels=4,
+        out_channels=8,
         num_layers=28,
         dropout=0.0,
         cross_attention_dim=1152,
-        attention_bias=False,
+        attention_bias=True,
         sample_size=64,  # latent 64x64 -> pixel 512x512 (matches Latte-1 pretraining)
         patch_size=2,
         activation_fn="gelu-approximate",
@@ -188,7 +188,21 @@ def train_with_predictor(
         for key in pretrained_state:
             if key in model_state and model_state[key].shape == pretrained_state[key].shape:
                 model_state[key] = pretrained_state[key]
-        
+
+        loaded_keys = 0
+        for key in pretrained_state:
+            if key in model_state and model_state[key].shape == pretrained_state[key].shape:
+                loaded_keys += 1
+        missing = [k for k in pretrained_state
+                   if k not in model_state or model_state[k].shape != pretrained_state[k].shape]
+        if missing:
+            print(f"WARNING: {len(missing)} pretrained keys silently dropped. First 10:")
+            for k in missing[:10]:
+                model_shape = model_state[k].shape if k in model_state else "MISSING"
+                print(f"  {k}: pretrained={pretrained_state[k].shape} model={model_shape}")
+            raise RuntimeError("Pretrained loading incomplete. Fix config and retry.")
+        print(f"Pretrained loading: {loaded_keys}/{len(pretrained_state)} keys loaded cleanly.")
+
         model.load_state_dict(model_state, strict=False)
         print("✓ Loaded pretrained Latte base")
 
@@ -256,14 +270,9 @@ def train_with_predictor(
     print(f"Percentage trainable:    {100*total_trainable/total_params:>11.2f}%")
     print("="*60 + "\n")
     
-    # Noise scheduler
-    noise_scheduler = DDPMScheduler(
-        num_train_timesteps=1000,
-        beta_schedule="scaled_linear",
-        beta_start=0.0001,
-        beta_end=0.02,
-        clip_sample=False,
-    )
+    # Noise scheduler — pull Latte-1's shipped config so training and inference
+    # use the same beta curve (linear, not scaled_linear).
+    noise_scheduler = DDPMScheduler.from_pretrained("maxin-cn/Latte-1", subfolder="scheduler")
     
     # Optimizer (only trainable params)
     optimizer = torch.optim.AdamW(
@@ -397,6 +406,12 @@ def train_with_predictor(
                     global_step, total_update_steps, tf_warmup_frac, tf_anneal_frac
                 )
 
+                # 10% chance to drop text conditioning so PredictorP and physics
+                # cross-attn learn the null-prompt distribution used by CFG at
+                # inference (guidance_scale > 1).
+                if torch.rand((), device=text_embeddings.device).item() < 0.1:
+                    text_embeddings = torch.zeros_like(text_embeddings)
+
                 # Forward pass (PredictorP predicts VJEPA, model uses it)
                 model_output, predicted_vjepa = model(
                     noisy_latents,
@@ -407,12 +422,15 @@ def train_with_predictor(
                     enable_temporal_attentions=True,
                 )
                 
-                # Loss 1: Noise prediction (main diffusion loss)
-                noise_loss = F.mse_loss(model_output.sample.to(torch.bfloat16), noise.to(torch.bfloat16), reduction="mean")
-                
+                # Loss 1: Noise prediction (main diffusion loss). Model outputs
+                # 8 channels (noise + learned variance); supervise only the
+                # first 4 (noise). Compute in fp32 to preserve small gradients.
+                model_output_noise = model_output.sample[:, :4]
+                noise_loss = F.mse_loss(model_output_noise.float(), noise.float(), reduction="mean")
+
                 # Loss 2: VJEPA prediction (PredictorP supervised by ground truth)
-                vjepa_loss = F.mse_loss(predicted_vjepa.to(torch.bfloat16), vjepa_gt.to(torch.bfloat16), reduction="mean")
-                
+                vjepa_loss = F.mse_loss(predicted_vjepa.float(), vjepa_gt.float(), reduction="mean")
+
                 # Combined loss
                 total_loss = noise_loss + vjepa_loss_weight * vjepa_loss
                 
